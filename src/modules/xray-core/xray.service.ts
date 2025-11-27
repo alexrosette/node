@@ -17,6 +17,7 @@ import { ISystemStats } from '@common/utils/get-system-stats/get-system-stats.in
 import { ICommandResponse } from '@common/types/command-response.type';
 import { generateApiConfig } from '@common/utils/generate-api-config';
 import { getSystemStats } from '@common/utils/get-system-stats';
+import { IDPIOptimizedConfig } from '@common/utils/interfaces/dpi-resistant.interfaces';
 import { IHashPayload, KNOWN_ERRORS, REMNAWAVE_NODE_KNOWN_ERROR } from '@libs/contracts/constants';
 
 import {
@@ -147,7 +148,13 @@ export class XrayService implements OnApplicationBootstrap {
                 this.logger.warn('Force restart requested');
             }
 
-            const fullConfig = generateApiConfig(config);
+            // Получаем DPI конфигурацию из переменных окружения
+            const dpiConfig = this.getDPIConfig();
+            if (dpiConfig?.enableDPIOptimization) {
+                this.logger.log('DPI-resistant optimizations enabled');
+            }
+
+            const fullConfig = generateApiConfig(config, dpiConfig);
 
             this.internalService.extractUsersFromConfig(hashPayload, fullConfig);
 
@@ -422,5 +429,72 @@ export class XrayService implements OnApplicationBootstrap {
                 error: error instanceof Error ? error.message : 'Unknown error',
             };
         }
+    }
+
+    /**
+     * Получает DPI конфигурацию из переменных окружения
+     */
+    private getDPIConfig(): IDPIOptimizedConfig | undefined {
+        const enableDPIOptimization = this.configService.get<boolean>('ENABLE_DPI_OPTIMIZATION') ?? false;
+
+        if (!enableDPIOptimization) {
+            return undefined;
+        }
+
+        const preferredTransport = this.configService.get<
+            'reality' | 'websocket' | 'grpc' | 'h2' | 'quic' | 'tcp' | 'xhttp'
+        >('DPI_PREFERRED_TRANSPORT');
+        const tlsFingerprint = this.configService.get<
+            'chrome' | 'firefox' | 'safari' | 'edge' | 'ios' | 'android' | 'randomized'
+        >('DPI_TLS_FINGERPRINT');
+        const enableXMUXJunkTraffic = this.configService.get<boolean>('ENABLE_XMUX_JUNK_TRAFFIC') ?? true;
+        const enablePacketSignatureMutation =
+            this.configService.get<boolean>('ENABLE_PACKET_SIGNATURE_MUTATION') ?? true;
+
+        const dpiConfig: IDPIOptimizedConfig = {
+            enableDPIOptimization: true,
+            preferredTransport: preferredTransport || 'reality',
+            tls: {
+                fingerprint: tlsFingerprint || 'chrome',
+                minVersion: '1.3',
+                maxVersion: '1.3',
+                alpn: ['h2', 'http/1.1'],
+            },
+            // Включаем XMUX с мусорным трафиком
+            xmux: {
+                enabled: true,
+                concurrency: 16,
+                enableJunkTraffic: enableXMUXJunkTraffic,
+                junkTrafficPercent: 40,
+                junkMinSize: 128,
+                junkMaxSize: 2048,
+                junkInterval: 3000,
+                junkTypes: ['mixed'],
+                enablePacketSignatureMutation: enablePacketSignatureMutation,
+                signatureMutationInterval: 3000,
+                enableHeaderObfuscation: true,
+            },
+            // Включаем изменение сигнатур пакетов
+            packetSignatureMutation: {
+                enabled: enablePacketSignatureMutation,
+                methods: ['randomize', 'rotate', 'scramble'],
+                interval: 3000,
+                minLength: 16,
+                maxLength: 64,
+            },
+            // Если используется xhttp, настраиваем его с максимальной маскировкой
+            ...(preferredTransport === 'xhttp' && {
+                xhttp: {
+                    enableJunkTraffic: true,
+                    junkTrafficPercent: 30,
+                    junkMinSize: 64,
+                    junkMaxSize: 1024,
+                    enablePacketSignatureMutation: enablePacketSignatureMutation,
+                    signatureMutationInterval: 5000,
+                },
+            }),
+        };
+
+        return dpiConfig;
     }
 }

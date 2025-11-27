@@ -31,6 +31,28 @@ export const configSchema = z
             .string()
             .default('false')
             .transform((val) => val === 'true'),
+        ENABLE_DPI_OPTIMIZATION: z
+            .string()
+            .default('false')
+            .transform((val) => val === 'true'),
+        DPI_PREFERRED_TRANSPORT: z
+            .enum(['reality', 'websocket', 'grpc', 'h2', 'quic', 'tcp', 'xhttp'])
+            .default('reality')
+            .optional(),
+        ENABLE_XMUX_JUNK_TRAFFIC: z
+            .string()
+            .default('true')
+            .transform((val) => val === 'true')
+            .optional(),
+        ENABLE_PACKET_SIGNATURE_MUTATION: z
+            .string()
+            .default('true')
+            .transform((val) => val === 'true')
+            .optional(),
+        DPI_TLS_FINGERPRINT: z
+            .enum(['chrome', 'firefox', 'safari', 'edge', 'ios', 'android', 'randomized'])
+            .default('chrome')
+            .optional(),
     })
     .superRefine((data, ctx) => {
         if (!data.SSL_CERT && !data.SECRET_KEY) {
