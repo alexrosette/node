@@ -29,13 +29,27 @@ export class PluginService {
         private readonly queryBus: QueryBus,
     ) {}
 
-    public async sync(body: SyncRequestDto): Promise<TResult<GenericResponseModel>> {
+    public async sync(
+        body: SyncRequestDto,
+        panelId: number,
+    ): Promise<TResult<GenericResponseModel>> {
         try {
             const { plugin } = body;
 
             if (!plugin) {
+                this.state.clearPanelPlugin(panelId);
+
                 if (!this.state.hasActivePlugin()) {
                     return ok(new GenericResponseModel(false));
+                }
+
+                const otherPanels = this.state.getOtherPanelPlugins(panelId);
+
+                if (otherPanels.length > 0) {
+                    this.logger.log(
+                        `[PLUGIN] Panel #${panelId} sent empty plugins, but plugins are still used by panel(s) ${otherPanels.map((p) => `#${p.panelId}`).join(', ')}. Keeping them.`,
+                    );
+                    return ok(new GenericResponseModel(true));
                 }
 
                 this.logger.log(
@@ -54,6 +68,18 @@ export class PluginService {
 
             const configHash = this.hashFn(plugin.config);
 
+            const differentPanels = this.state
+                .getOtherPanelPlugins(panelId)
+                .filter((p) => p.configHash !== configHash);
+
+            if (differentPanels.length > 0) {
+                this.logger.warn(
+                    `[PLUGIN] Panel #${panelId} sent a plugin config that differs from panel(s) ${differentPanels.map((p) => `#${p.panelId}`).join(', ')}. The last received config is applied. Use identical plugins on all panels.`,
+                );
+            }
+
+            this.state.setPanelPlugin(panelId, configHash);
+
             if (!this.state.isConfigChanged(configHash)) {
                 this.logger.debug('[PLUGIN] Config unchanged. Skipping sync.');
                 return ok(new GenericResponseModel(true));
@@ -63,6 +89,7 @@ export class PluginService {
 
             if (!parsed.success) {
                 this.logger.error(`[PLUGIN] Invalid config: ${JSON.stringify(parsed.error)}`);
+                this.state.clearPanelPlugin(panelId);
                 await this.resetPlugins();
                 await this.commandBus.execute(
                     new StopXrayCommand({
@@ -285,13 +312,15 @@ export class PluginService {
         return sharedMap;
     }
 
-    public async collectReports(): Promise<TResult<TorrentBlockerReportsResponseModel>> {
+    public async collectReports(
+        panelId: number,
+    ): Promise<TResult<TorrentBlockerReportsResponseModel>> {
         try {
-            if (!this.state.torrentBlocker.reportsCount) {
+            if (!this.state.torrentBlocker.reportsCount(panelId)) {
                 return ok(new TorrentBlockerReportsResponseModel([]));
             }
 
-            const reports = this.state.torrentBlocker.flushReports();
+            const reports = this.state.torrentBlocker.flushReports(panelId);
             return ok(new TorrentBlockerReportsResponseModel(reports));
         } catch (error) {
             this.logger.error(error);

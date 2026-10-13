@@ -1,0 +1,53 @@
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [
+    {
+      "tag": "in-p1u1",
+      "listen": "127.0.0.1",
+      "port": 9001,
+      "protocol": "dokodemo-door",
+      "settings": { "address": "rwweb", "port": 8080, "network": "tcp" }
+    },
+    {
+      "tag": "in-p2u3",
+      "listen": "127.0.0.1",
+      "port": 9003,
+      "protocol": "dokodemo-door",
+      "settings": { "address": "rwweb", "port": 8080, "network": "tcp" }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "p1u1",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "rwn",
+            "port": 10001,
+            "users": [{ "id": "2f8fe63a-6224-421d-a5d0-a24cf30067d3", "encryption": "none" }]
+          }
+        ]
+      }
+    },
+    {
+      "tag": "p2u3",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "rwn",
+            "port": 10001,
+            "users": [{ "id": "ce8e0834-8ced-4c0d-ac0c-cda524ab3162", "encryption": "none" }]
+          }
+        ]
+      }
+    }
+  ],
+  "routing": {
+    "rules": [
+      { "type": "field", "inboundTag": ["in-p1u1"], "outboundTag": "p1u1" },
+      { "type": "field", "inboundTag": ["in-p2u3"], "outboundTag": "p2u3" }
+    ]
+  }
+}

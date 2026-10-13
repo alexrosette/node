@@ -3,6 +3,7 @@ import { Body, Controller, Get, Ip, Logger, Post, UseFilters, UseGuards } from '
 import { HttpExceptionFilter } from '@common/exception/http-exception.filter';
 import { JwtDefaultGuard } from '@common/guards/jwt-guards';
 import { errorHandler } from '@common/helpers/error-handler.helper';
+import { PanelId } from '@common/multi-panel';
 import { XRAY_CONTROLLER, XRAY_ROUTES } from '@libs/contracts/api';
 
 import {
@@ -25,8 +26,9 @@ export class XrayController {
     public async startXray(
         @Body() body: StartXrayRequestDto,
         @Ip() ip: string,
+        @PanelId() panelId: number,
     ): Promise<StartXrayResponseDto> {
-        const response = await this.xrayService.startXray(body, ip);
+        const response = await this.xrayService.startXray(body, ip, panelId);
         const data = errorHandler(response);
 
         return {
@@ -35,13 +37,10 @@ export class XrayController {
     }
 
     @Get(XRAY_ROUTES.STOP)
-    public async stopXray(): Promise<StopXrayResponseDto> {
-        this.logger.log('Remnawave requested to stop Xray.');
+    public async stopXray(@PanelId() panelId: number): Promise<StopXrayResponseDto> {
+        this.logger.log(`Remnawave (panel #${panelId}) requested to stop Xray.`);
 
-        const response = await this.xrayService.stopXray({
-            withOnlineCheck: false,
-            withPluginCleanup: true,
-        });
+        const response = await this.xrayService.stopXrayForPanel(panelId);
         const data = errorHandler(response);
 
         return {

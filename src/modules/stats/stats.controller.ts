@@ -1,8 +1,9 @@
 import { Body, Controller, Get, Post, UseFilters, UseGuards } from '@nestjs/common';
 
-import { JwtDefaultGuard } from '@common/guards/jwt-guards';
 import { HttpExceptionFilter } from '@common/exception';
+import { JwtDefaultGuard } from '@common/guards/jwt-guards';
 import { errorHandler } from '@common/helpers';
+import { PanelId } from '@common/multi-panel';
 import { STATS_CONTROLLER, STATS_ROUTES } from '@libs/contracts/api/controllers/stats';
 
 import {
@@ -41,8 +42,9 @@ export class StatsController {
     @Post(STATS_ROUTES.GET_USER_ONLINE_STATUS)
     public async getUserOnlineStatus(
         @Body() body: GetUserOnlineStatusRequestDto,
+        @PanelId() panelId: number,
     ): Promise<GetUserOnlineStatusResponseDto> {
-        const response = await this.statsService.getUserOnlineStatus(body);
+        const response = await this.statsService.getUserOnlineStatus(body, panelId);
         const data = errorHandler(response);
 
         return {
@@ -61,8 +63,8 @@ export class StatsController {
     }
 
     @Get(STATS_ROUTES.GET_SYSTEM_STATS)
-    public async getSystemStats(): Promise<GetSystemStatsResponseDto> {
-        const response = await this.statsService.getSystemStats();
+    public async getSystemStats(@PanelId() panelId: number): Promise<GetSystemStatsResponseDto> {
+        const response = await this.statsService.getSystemStats(panelId);
         const data = errorHandler(response);
 
         return {
@@ -73,9 +75,10 @@ export class StatsController {
     @Post(STATS_ROUTES.GET_USERS_STATS)
     public async getUsersStats(
         @Body() body: GetUsersStatsRequestDto,
+        @PanelId() panelId: number,
     ): Promise<GetUsersStatsResponseDto> {
         const { reset } = body;
-        const response = await this.statsService.getUsersStats(reset);
+        const response = await this.statsService.getUsersStats(reset, panelId);
         const data = errorHandler(response);
 
         return {
@@ -86,9 +89,10 @@ export class StatsController {
     @Post(STATS_ROUTES.GET_INBOUND_STATS)
     public async getInboundStats(
         @Body() body: GetInboundStatsRequestDto,
+        @PanelId() panelId: number,
     ): Promise<GetInboundStatsResponseDto> {
         const { tag, reset } = body;
-        const response = await this.statsService.getInboundStats(tag, reset);
+        const response = await this.statsService.getInboundStats(tag, reset, panelId);
         const data = errorHandler(response);
 
         return {
@@ -99,9 +103,10 @@ export class StatsController {
     @Post(STATS_ROUTES.GET_OUTBOUND_STATS)
     public async getOutboundStats(
         @Body() body: GetOutboundStatsRequestDto,
+        @PanelId() panelId: number,
     ): Promise<GetOutboundStatsResponseDto> {
         const { tag, reset } = body;
-        const response = await this.statsService.getOutboundStats(tag, reset);
+        const response = await this.statsService.getOutboundStats(tag, reset, panelId);
         const data = errorHandler(response);
 
         return {
@@ -112,9 +117,10 @@ export class StatsController {
     @Post(STATS_ROUTES.GET_ALL_INBOUNDS_STATS)
     public async getAllInboundsStats(
         @Body() body: GetAllInboundsStatsRequestDto,
+        @PanelId() panelId: number,
     ): Promise<GetAllInboundsStatsResponseDto> {
         const { reset } = body;
-        const response = await this.statsService.getAllInboundsStats(reset);
+        const response = await this.statsService.getAllInboundsStats(reset, panelId);
         const data = errorHandler(response);
 
         return {
@@ -125,9 +131,10 @@ export class StatsController {
     @Post(STATS_ROUTES.GET_ALL_OUTBOUNDS_STATS)
     public async getAllOutboundsStats(
         @Body() body: GetAllOutboundsStatsRequestDto,
+        @PanelId() panelId: number,
     ): Promise<GetAllOutboundsStatsResponseDto> {
         const { reset } = body;
-        const response = await this.statsService.getAllOutboundsStats(reset);
+        const response = await this.statsService.getAllOutboundsStats(reset, panelId);
         const data = errorHandler(response);
 
         return {
@@ -138,9 +145,10 @@ export class StatsController {
     @Post(STATS_ROUTES.GET_COMBINED_STATS)
     public async getCombinedStats(
         @Body() body: GetCombinedStatsRequestDto,
+        @PanelId() panelId: number,
     ): Promise<GetCombinedStatsResponseDto> {
         const { reset } = body;
-        const response = await this.statsService.getCombinedStats(reset);
+        const response = await this.statsService.getCombinedStats(reset, panelId);
         const data = errorHandler(response);
 
         return {
@@ -151,9 +159,10 @@ export class StatsController {
     @Post(STATS_ROUTES.GET_USER_IP_LIST)
     public async getUserIpList(
         @Body() body: GetUserIpListRequestDto,
+        @PanelId() panelId: number,
     ): Promise<GetUserIpListResponseDto> {
         const { userId } = body;
-        const response = await this.statsService.getUserIpList(userId);
+        const response = await this.statsService.getUserIpList(userId, panelId);
         const data = errorHandler(response);
 
         return {
@@ -162,8 +171,8 @@ export class StatsController {
     }
 
     @Get(STATS_ROUTES.GET_USERS_IP_LIST)
-    public async getUsersIpList(): Promise<GetUsersIpListResponseDto> {
-        const response = await this.statsService.getUsersIpList();
+    public async getUsersIpList(@PanelId() panelId: number): Promise<GetUsersIpListResponseDto> {
+        const response = await this.statsService.getUsersIpList(panelId);
         const data = errorHandler(response);
 
         return {

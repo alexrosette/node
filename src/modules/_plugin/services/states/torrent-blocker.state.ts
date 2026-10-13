@@ -9,7 +9,8 @@ export class TorrentBlockerState {
     private includeRuleTags = new Set<string>();
     private webhookUrl: string | null = null;
     private rulePositionValue = 0;
-    private reports: TorrentBlockerReportModel[] = [];
+    /** panelId -> reports of users that belong to this panel */
+    private reports = new Map<number, TorrentBlockerReportModel[]>();
 
     get isEnabled(): boolean {
         return this.enabled;
@@ -49,18 +50,25 @@ export class TorrentBlockerState {
         return this.ignoredUsers.has(userId);
     }
 
-    addReport(report: TorrentBlockerReportModel): void {
-        this.reports.push(report);
+    addReport(panelId: number, report: TorrentBlockerReportModel): void {
+        let reports = this.reports.get(panelId);
+
+        if (!reports) {
+            reports = [];
+            this.reports.set(panelId, reports);
+        }
+
+        reports.push(report);
     }
 
-    flushReports(): TorrentBlockerReportModel[] {
-        const flushed = this.reports;
-        this.reports = [];
+    flushReports(panelId: number): TorrentBlockerReportModel[] {
+        const flushed = this.reports.get(panelId) ?? [];
+        this.reports.delete(panelId);
         return flushed;
     }
 
-    get reportsCount(): number {
-        return this.reports.length;
+    reportsCount(panelId: number): number {
+        return this.reports.get(panelId)?.length ?? 0;
     }
 
     reset(): void {

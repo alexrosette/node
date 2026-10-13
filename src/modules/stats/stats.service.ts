@@ -4,6 +4,7 @@ import { QueryBus } from '@nestjs/cqrs';
 import { XtlsApi } from '@remnawave/xtls-sdk';
 import { InjectXtls } from '@remnawave/xtls-sdk-nestjs';
 
+import { ownUsername, toXrayEmail } from '@common/multi-panel';
 import { fail, ok, TResult } from '@common/types';
 import { getSystemStats } from '@common/utils/get-system-stats';
 import { ERRORS } from '@libs/contracts/constants';
@@ -23,20 +24,25 @@ import {
     GetUsersIpListResponseModel,
     GetUsersStatsResponseModel,
 } from './models';
+import { StatsLedgerService } from './stats-ledger.service';
 
 @Injectable()
 export class StatsService {
     constructor(
         @InjectXtls() private readonly xtlsSdk: XtlsApi,
         private readonly queryBus: QueryBus,
+        private readonly ledger: StatsLedgerService,
     ) {}
     private readonly logger = new Logger(StatsService.name);
 
     public async getUserOnlineStatus(
         body: IGetUserOnlineStatusRequest,
+        panelId: number,
     ): Promise<TResult<GetUserOnlineStatusResponseModel>> {
         try {
-            const response = await this.xtlsSdk.stats.getUserOnlineStatus(body.username);
+            const response = await this.xtlsSdk.stats.getUserOnlineStatus(
+                toXrayEmail(panelId, body.username),
+            );
 
             if (response.isOk && response.data) {
                 return ok(new GetUserOnlineStatusResponseModel(response.data.online));
@@ -52,7 +58,7 @@ export class StatsService {
         }
     }
 
-    public async getSystemStats(): Promise<TResult<GetSystemStatsResponseModel>> {
+    public async getSystemStats(panelId: number): Promise<TResult<GetSystemStatsResponseModel>> {
         try {
             const response = await this.xtlsSdk.stats.getSysStats();
 
@@ -64,7 +70,7 @@ export class StatsService {
             const interfaceStats = await this.queryBus.execute(new GetInterfaceStatsQuery());
             const systemStats = getSystemStats();
             const reportsCount = await this.queryBus.execute(
-                new GetTorrentBlockerReportsCountQuery(),
+                new GetTorrentBlockerReportsCountQuery(panelId),
             );
 
             return {
@@ -91,32 +97,22 @@ export class StatsService {
         }
     }
 
-    public async getUsersStats(reset: boolean): Promise<TResult<GetUsersStatsResponseModel>> {
+    public async getUsersStats(
+        reset: boolean,
+        panelId: number,
+    ): Promise<TResult<GetUsersStatsResponseModel>> {
         try {
-            const response = await this.xtlsSdk.stats.getAllUsersStats(reset);
+            const users = await this.ledger.takeUsersStats(panelId, reset);
 
-            if (!response.isOk || !response.data) {
-                this.logger.warn(response);
-
+            if (!users) {
                 return fail(ERRORS.FAILED_TO_GET_USERS_STATS);
             }
 
             return ok(
                 new GetUsersStatsResponseModel(
-                    response.data.users.filter((user) => user.uplink !== 0 || user.downlink !== 0),
+                    users.filter((user) => user.uplink !== 0 || user.downlink !== 0),
                 ),
             );
-
-            // const demoRes = Array.from({ length: 160_000 }, (_, i) => ({
-            //     username: String(i + 1),
-            //     uplink: Math.floor(Math.random() * (107374182400 - 10485760) + 10485760), // Random between 10MB and 100GB
-            //     downlink: Math.floor(Math.random() * (107374182400 - 10485760) + 10485760), // Random between 10MB and 100GB
-            // }));
-
-            // return {
-            //     isOk: true,
-            //     response: new GetUsersStatsResponseModel(demoRes),
-            // };
         } catch (error) {
             this.logger.error(error);
             return fail(ERRORS.FAILED_TO_GET_USERS_STATS);
@@ -126,21 +122,16 @@ export class StatsService {
     public async getInboundStats(
         tag: string,
         reset: boolean,
+        panelId: number,
     ): Promise<TResult<GetInboundStatsResponseModel>> {
         try {
-            const response = await this.xtlsSdk.stats.getInboundStats(tag, reset);
+            const inbound = await this.ledger.takeInboundStats(panelId, tag, reset);
 
-            if (!response.isOk || !response.data || !response.data.inbound) {
+            if (!inbound) {
                 return fail(ERRORS.FAILED_TO_GET_INBOUND_STATS);
             }
 
-            return ok(
-                new GetInboundStatsResponseModel({
-                    inbound: response.data.inbound.inbound,
-                    downlink: response.data.inbound.downlink,
-                    uplink: response.data.inbound.uplink,
-                }),
-            );
+            return ok(new GetInboundStatsResponseModel(inbound));
         } catch (error) {
             this.logger.error(error);
             return fail(ERRORS.FAILED_TO_GET_INBOUND_STATS);
@@ -150,21 +141,16 @@ export class StatsService {
     public async getOutboundStats(
         tag: string,
         reset: boolean,
+        panelId: number,
     ): Promise<TResult<GetOutboundStatsResponseModel>> {
         try {
-            const response = await this.xtlsSdk.stats.getOutboundStats(tag, reset);
+            const outbound = await this.ledger.takeOutboundStats(panelId, tag, reset);
 
-            if (!response.isOk || !response.data || !response.data.outbound) {
+            if (!outbound) {
                 return fail(ERRORS.FAILED_TO_GET_OUTBOUND_STATS);
             }
 
-            return ok(
-                new GetOutboundStatsResponseModel({
-                    outbound: response.data.outbound.outbound,
-                    downlink: response.data.outbound.downlink,
-                    uplink: response.data.outbound.uplink,
-                }),
-            );
+            return ok(new GetOutboundStatsResponseModel(outbound));
         } catch (error) {
             this.logger.error(error);
             return fail(ERRORS.FAILED_TO_GET_OUTBOUND_STATS);
@@ -173,15 +159,16 @@ export class StatsService {
 
     public async getAllInboundsStats(
         reset: boolean,
+        panelId: number,
     ): Promise<TResult<GetAllInboundsStatsResponseModel>> {
         try {
-            const response = await this.xtlsSdk.stats.getAllInboundsStats(reset);
+            const inbounds = await this.ledger.takeInboundsStats(panelId, reset);
 
-            if (!response.isOk || !response.data) {
+            if (!inbounds) {
                 return fail(ERRORS.FAILED_TO_GET_INBOUNDS_STATS);
             }
 
-            return ok(new GetAllInboundsStatsResponseModel(response.data.inbounds));
+            return ok(new GetAllInboundsStatsResponseModel(inbounds));
         } catch (error) {
             this.logger.error(error);
             return fail(ERRORS.FAILED_TO_GET_INBOUNDS_STATS);
@@ -190,46 +177,48 @@ export class StatsService {
 
     public async getAllOutboundsStats(
         reset: boolean,
+        panelId: number,
     ): Promise<TResult<GetAllOutboundsStatsResponseModel>> {
         try {
-            const response = await this.xtlsSdk.stats.getAllOutboundsStats(reset);
+            const outbounds = await this.ledger.takeOutboundsStats(panelId, reset);
 
-            if (!response.isOk || !response.data) {
-                this.logger.error(response);
+            if (!outbounds) {
                 return fail(ERRORS.FAILED_TO_GET_OUTBOUNDS_STATS);
             }
 
-            return ok(new GetAllOutboundsStatsResponseModel(response.data.outbounds));
+            return ok(new GetAllOutboundsStatsResponseModel(outbounds));
         } catch (error) {
             this.logger.error(error);
             return fail(ERRORS.FAILED_TO_GET_INBOUNDS_STATS);
         }
     }
 
-    public async getCombinedStats(reset: boolean): Promise<TResult<GetCombinedStatsResponseModel>> {
+    public async getCombinedStats(
+        reset: boolean,
+        panelId: number,
+    ): Promise<TResult<GetCombinedStatsResponseModel>> {
         try {
-            const { isOk: isOkInbounds, data: inboundsData } =
-                await this.xtlsSdk.stats.getAllInboundsStats(reset);
-            const { isOk: isOkOutbounds, data: outboundsData } =
-                await this.xtlsSdk.stats.getAllOutboundsStats(reset);
+            const inbounds = await this.ledger.takeInboundsStats(panelId, reset);
+            const outbounds = await this.ledger.takeOutboundsStats(panelId, reset);
 
-            if (!isOkInbounds || !inboundsData || !isOkOutbounds || !outboundsData) {
+            if (!inbounds || !outbounds) {
                 return fail(ERRORS.FAILED_TO_GET_COMBINED_STATS);
             }
 
-            return ok(
-                new GetCombinedStatsResponseModel(inboundsData.inbounds, outboundsData.outbounds),
-            );
+            return ok(new GetCombinedStatsResponseModel(inbounds, outbounds));
         } catch (error) {
             this.logger.error(error);
             return fail(ERRORS.FAILED_TO_GET_COMBINED_STATS);
         }
     }
 
-    public async getUserIpList(userId: string): Promise<TResult<GetUserIpListResponseModel>> {
+    public async getUserIpList(
+        userId: string,
+        panelId: number,
+    ): Promise<TResult<GetUserIpListResponseModel>> {
         try {
             const userIps = await this.xtlsSdk.stats.rawClient.getStatsOnlineIpList({
-                name: `user>>>${userId}>>>online`,
+                name: `user>>>${toXrayEmail(panelId, userId)}>>>online`,
                 reset: true,
             });
 
@@ -249,7 +238,7 @@ export class StatsService {
         }
     }
 
-    public async getUsersIpList(): Promise<TResult<GetUsersIpListResponseModel>> {
+    public async getUsersIpList(panelId: number): Promise<TResult<GetUsersIpListResponseModel>> {
         try {
             const response = await this.xtlsSdk.stats.getUsersStats(false, false);
 
@@ -258,7 +247,13 @@ export class StatsService {
                 return ok(new GetUsersIpListResponseModel([]));
             }
 
-            return ok(new GetUsersIpListResponseModel(response.data.users));
+            const users = response.data.users.flatMap((user) => {
+                const username = ownUsername(panelId, user.userId);
+
+                return username === null ? [] : [{ userId: username, ips: user.ips }];
+            });
+
+            return ok(new GetUsersIpListResponseModel(users));
         } catch (error) {
             this.logger.error(error);
             return ok(new GetUsersIpListResponseModel([]));

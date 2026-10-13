@@ -3,6 +3,7 @@ import { Body, Controller, Post, UseFilters, UseGuards } from '@nestjs/common';
 import { HttpExceptionFilter } from '@common/exception';
 import { JwtDefaultGuard } from '@common/guards/jwt-guards';
 import { errorHandler } from '@common/helpers';
+import { PanelId } from '@common/multi-panel';
 import { HANDLER_CONTROLLER, HANDLER_ROUTES } from '@libs/contracts/api/controllers/handler';
 
 import {
@@ -27,8 +28,11 @@ export class HandlerController {
     constructor(private readonly handlerService: HandlerService) {}
 
     @Post(HANDLER_ROUTES.ADD_USER)
-    public async addUser(@Body() body: AddUserRequestDto): Promise<AddUserResponseDto> {
-        const response = await this.handlerService.addUser(body);
+    public async addUser(
+        @Body() body: AddUserRequestDto,
+        @PanelId() panelId: number,
+    ): Promise<AddUserResponseDto> {
+        const response = await this.handlerService.addUser(body, panelId);
         const data = errorHandler(response);
 
         return {
@@ -37,8 +41,11 @@ export class HandlerController {
     }
 
     @Post(HANDLER_ROUTES.REMOVE_USER)
-    public async removeUser(@Body() body: RemoveUserRequestDto): Promise<RemoveUserResponseDto> {
-        const response = await this.handlerService.removeUser(body);
+    public async removeUser(
+        @Body() body: RemoveUserRequestDto,
+        @PanelId() panelId: number,
+    ): Promise<RemoveUserResponseDto> {
+        const response = await this.handlerService.removeUser(body, panelId);
         const data = errorHandler(response);
 
         return {
@@ -47,8 +54,11 @@ export class HandlerController {
     }
 
     @Post(HANDLER_ROUTES.ADD_USERS)
-    public async addUsers(@Body() body: AddUsersRequestDto): Promise<AddUsersResponseDto> {
-        const response = await this.handlerService.addUsers(body);
+    public async addUsers(
+        @Body() body: AddUsersRequestDto,
+        @PanelId() panelId: number,
+    ): Promise<AddUsersResponseDto> {
+        const response = await this.handlerService.addUsers(body, panelId);
         const data = errorHandler(response);
 
         return {
@@ -57,8 +67,11 @@ export class HandlerController {
     }
 
     @Post(HANDLER_ROUTES.REMOVE_USERS)
-    public async removeUsers(@Body() body: RemoveUsersRequestDto): Promise<RemoveUsersResponseDto> {
-        const response = await this.handlerService.removeUsers(body);
+    public async removeUsers(
+        @Body() body: RemoveUsersRequestDto,
+        @PanelId() panelId: number,
+    ): Promise<RemoveUsersResponseDto> {
+        const response = await this.handlerService.removeUsers(body, panelId);
         const data = errorHandler(response);
 
         return {
@@ -69,8 +82,9 @@ export class HandlerController {
     @Post(HANDLER_ROUTES.DROP_USERS_CONNECTIONS)
     public async dropUsersConnections(
         @Body() body: DropUsersConnectionsRequestDto,
+        @PanelId() panelId: number,
     ): Promise<DropUsersConnectionsResponseDto> {
-        const response = await this.handlerService.dropUsersConnections(body);
+        const response = await this.handlerService.dropUsersConnections(body, panelId);
         const data = errorHandler(response);
 
         return {

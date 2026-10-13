@@ -4,6 +4,9 @@ Node for Remnawave Panel.
 
 Learn more about Remnawave Panel [here](https://docs.rw/).
 
+> **This fork supports multi-panel mode** — one node container serving several Remnawave panels at once.
+> See [MULTI_PANEL.md](MULTI_PANEL.md).
+
 # Contributors
 
 Check [open issues](https://github.com/remnawave/panel/issues) to help the progress of this project.

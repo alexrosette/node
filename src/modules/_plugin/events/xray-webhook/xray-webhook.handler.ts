@@ -3,6 +3,7 @@ import { isIP } from 'node:net';
 import { Logger } from '@nestjs/common';
 import { IEventHandler, EventsHandler } from '@nestjs/cqrs';
 
+import { fromXrayEmail, getPanel } from '@common/multi-panel';
 import { formatExecutionTime, getTime } from '@common/utils/get-elapsed-time';
 import { sendWebhook } from '@common/utils/send-webhook';
 import { TorrentBlockerReportModel, XrayWebhookSchema } from '@libs/contracts/models';
@@ -34,15 +35,22 @@ export class XrayWebhookHandler implements IEventHandler<XrayWebhookEvent> {
 
             this.logger.debug(JSON.stringify(parsed.data, null, 2));
 
-            const webhook = parsed.data;
+            const ip = this.extractIp(parsed.data.source);
 
-            const ip = this.extractIp(webhook.source);
+            if (!ip || !parsed.data.email) return;
 
-            if (!ip || !webhook.email) return;
+            // Users of secondary panels are namespaced inside Xray, panels expect their own ids.
+            const owner = fromXrayEmail(parsed.data.email);
+            const webhook = { ...parsed.data, email: owner.username };
+
+            if (!getPanel(owner.panelId)) {
+                this.logger.warn(`Webhook for user of unknown panel #${owner.panelId}, skipping.`);
+                return;
+            }
 
             const whitelisted =
                 this.pluginState.torrentBlocker.isIpIgnored(ip) ||
-                this.pluginState.torrentBlocker.isUserIgnored(webhook.email);
+                this.pluginState.torrentBlocker.isUserIgnored(owner.username);
 
             if (whitelisted) {
                 return;
@@ -57,7 +65,7 @@ export class XrayWebhookHandler implements IEventHandler<XrayWebhookEvent> {
                 blocked = true;
 
                 this.logger.log(
-                    `[TORRENT-BLOCKER] IP: ${ip}, user: ${webhook.email}, blocked: ${blocked}, duration: ${blockDuration}s`,
+                    `[TORRENT-BLOCKER] IP: ${ip}, user: ${webhook.email} (panel #${owner.panelId}), blocked: ${blocked}, duration: ${blockDuration}s`,
                 );
             } catch (error) {
                 this.logger.error(`Failed to block IP ${ip}: ${error}`);
@@ -75,7 +83,7 @@ export class XrayWebhookHandler implements IEventHandler<XrayWebhookEvent> {
                 xrayReport: webhook,
             };
 
-            this.pluginState.torrentBlocker.addReport(report);
+            this.pluginState.torrentBlocker.addReport(owner.panelId, report);
 
             const webhookUrl = this.pluginState.torrentBlocker.getWebhookUrl();
 

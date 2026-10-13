@@ -24,6 +24,9 @@ export class PluginStateService {
 
     private pluginConfigDetails: { uuid: string; name: string } | null = null;
 
+    /** panelId -> hash of the plugin config the panel has sent */
+    private readonly panelPlugins = new Map<number, string>();
+
     get isInitialized(): boolean {
         return this.initialized;
     }
@@ -68,5 +71,19 @@ export class PluginStateService {
 
     hasActivePlugin(): boolean {
         return this.pluginConfigDetails !== null;
+    }
+
+    setPanelPlugin(panelId: number, configHash: string): void {
+        this.panelPlugins.set(panelId, configHash);
+    }
+
+    clearPanelPlugin(panelId: number): void {
+        this.panelPlugins.delete(panelId);
+    }
+
+    getOtherPanelPlugins(panelId: number): Array<{ panelId: number; configHash: string }> {
+        return [...this.panelPlugins]
+            .filter(([id]) => id !== panelId)
+            .map(([id, configHash]) => ({ panelId: id, configHash }));
     }
 }

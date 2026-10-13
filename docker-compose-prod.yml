@@ -14,3 +14,8 @@ services:
     environment:
       - NODE_PORT=2222
       - SECRET_KEY=""
+      # Multi-panel: one more port + SECRET_KEY per extra panel (see MULTI_PANEL.md)
+      # - NODE_PORT_2=2223
+      # - SECRET_KEY_2=""
+      # - NODE_PORT_3=2224
+      # - SECRET_KEY_3=""

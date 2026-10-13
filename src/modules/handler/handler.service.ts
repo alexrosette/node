@@ -12,7 +12,10 @@ import {
     AddUserResponseModel as AddUserResponseModelFromSdk,
 } from '@remnawave/xtls-sdk/build/src/handler/models';
 
+import { toXrayEmail } from '@common/multi-panel';
 import { fail, ok, TResult } from '@common/types';
+import { withCoreLock } from '@common/utils/core-lock';
+import { buildXrayClient } from '@common/utils/xray-clients';
 import { ERRORS } from '@libs/contracts/constants/errors';
 
 import { DropConnectionsEvent } from '../_plugin/events/drop-connections';
@@ -52,11 +55,21 @@ export class HandlerService implements OnModuleInit {
         }
     }
 
-    public async addUser(data: AddUserRequestDto): Promise<TResult<AddUserResponseModel>> {
+    public async addUser(
+        data: AddUserRequestDto,
+        panelId: number,
+    ): Promise<TResult<AddUserResponseModel>> {
+        return withCoreLock(() => this.addUserUnsafe(data, panelId));
+    }
+
+    private async addUserUnsafe(
+        data: AddUserRequestDto,
+        panelId: number,
+    ): Promise<TResult<AddUserResponseModel>> {
         try {
             const { data: requestData, hashData } = data;
             const response: Array<ISdkResponse<AddUserResponseModelFromSdk>> = [];
-            const userId = requestData[0].username;
+            const userId = toXrayEmail(panelId, requestData[0].username);
             let userIps: string[] | null = null;
 
             for (const item of requestData) {
@@ -72,11 +85,12 @@ export class HandlerService implements OnModuleInit {
 
                 await this.xtlsApi.handler.removeUser(tag, userId);
 
-                if (hashData.prevVlessUuid) {
-                    await this.internalService.removeUserFromInbound(tag, hashData.prevVlessUuid);
-                } else {
-                    await this.internalService.removeUserFromInbound(tag, hashData.vlessUuid);
-                }
+                await this.internalService.removeUserFromInbound(
+                    panelId,
+                    tag,
+                    hashData.prevVlessUuid ?? hashData.vlessUuid,
+                    userId,
+                );
             }
 
             if (userIps && hashData.prevVlessUuid) {
@@ -84,93 +98,76 @@ export class HandlerService implements OnModuleInit {
             }
 
             for (const item of requestData) {
-                let tempRes = null;
+                let tempRes: ISdkResponse<AddUserResponseModelFromSdk>;
 
-                this.logger.debug(`Adding user: ${item.username} with type: ${item.type}`);
+                const username = toXrayEmail(panelId, item.username);
+
+                this.logger.debug(`Adding user: ${username} with type: ${item.type}`);
 
                 switch (item.type) {
                     case 'trojan':
                         tempRes = await this.xtlsApi.handler.addTrojanUser({
                             tag: item.tag,
-                            username: item.username,
+                            username,
                             password: item.password,
                             level: 0,
                         });
-                        if (tempRes.isOk) {
-                            await this.internalService.addUserToInbound(
-                                item.tag,
-                                hashData.vlessUuid,
-                            );
-                        }
-                        response.push(tempRes);
                         break;
                     case 'vless':
                         tempRes = await this.xtlsApi.handler.addVlessUser({
                             tag: item.tag,
-                            username: item.username,
+                            username,
                             uuid: item.uuid,
                             flow: item.flow,
                             level: 0,
                         });
-                        if (tempRes.isOk) {
-                            await this.internalService.addUserToInbound(
-                                item.tag,
-                                hashData.vlessUuid,
-                            );
-                        }
-                        response.push(tempRes);
                         break;
                     case 'shadowsocks':
                         tempRes = await this.xtlsApi.handler.addShadowsocksUser({
                             tag: item.tag,
-                            username: item.username,
+                            username,
                             password: item.password,
                             cipherType: item.cipherType,
                             ivCheck: false,
                             level: 0,
                         });
-                        if (tempRes.isOk) {
-                            await this.internalService.addUserToInbound(
-                                item.tag,
-                                hashData.vlessUuid,
-                            );
-                        }
-                        response.push(tempRes);
                         break;
                     case 'shadowsocks22':
                         tempRes = await this.xtlsApi.handler.addShadowsocks2022User({
                             tag: item.tag,
-                            username: item.username,
+                            username,
                             key: item.password,
                             level: 0,
                         });
-
-                        if (tempRes.isOk) {
-                            await this.internalService.addUserToInbound(
-                                item.tag,
-                                hashData.vlessUuid,
-                            );
-                        }
-                        response.push(tempRes);
                         break;
                     case 'hysteria':
                         tempRes = await this.xtlsApi.handler.addHysteriaUser({
                             tag: item.tag,
-                            username: item.username,
+                            username,
                             uuid: item.password,
                             level: 0,
                         });
-
-                        if (tempRes.isOk) {
-                            await this.internalService.addUserToInbound(
-                                item.tag,
-                                hashData.vlessUuid,
-                            );
-                        }
-                        response.push(tempRes);
-
                         break;
                 }
+
+                if (tempRes.isOk) {
+                    await this.internalService.addUserToInbound(
+                        panelId,
+                        item.tag,
+                        hashData.vlessUuid,
+                        buildXrayClient({
+                            type: item.type,
+                            email: username,
+                            hashUuid: hashData.vlessUuid,
+                            vlessUuid: item.type === 'vless' ? item.uuid : hashData.vlessUuid,
+                            password: item.type === 'vless' ? undefined : item.password,
+                            cipherType: item.type === 'shadowsocks' ? item.cipherType : undefined,
+                            inbound: this.internalService.getTemplateInbound(item.tag),
+                        }),
+                    );
+                }
+
+                response.push(tempRes);
             }
 
             if (response.every((res) => !res.isOk)) {
@@ -194,9 +191,20 @@ export class HandlerService implements OnModuleInit {
         }
     }
 
-    public async removeUser(data: RemoveUserRequestDto): Promise<TResult<RemoveUserResponseModel>> {
+    public async removeUser(
+        data: RemoveUserRequestDto,
+        panelId: number,
+    ): Promise<TResult<RemoveUserResponseModel>> {
+        return withCoreLock(() => this.removeUserUnsafe(data, panelId));
+    }
+
+    private async removeUserUnsafe(
+        data: RemoveUserRequestDto,
+        panelId: number,
+    ): Promise<TResult<RemoveUserResponseModel>> {
         try {
-            const { username, hashData } = data;
+            const { hashData } = data;
+            const username = toXrayEmail(panelId, data.username);
             const response: Array<ISdkResponse<RemoveUserResponseModelFromSdk>> = [];
 
             const inboundTags = this.internalService.getXtlsConfigInbounds();
@@ -212,7 +220,12 @@ export class HandlerService implements OnModuleInit {
 
                 const tempRes = await this.xtlsApi.handler.removeUser(tag, username);
 
-                await this.internalService.removeUserFromInbound(tag, hashData.vlessUuid);
+                await this.internalService.removeUserFromInbound(
+                    panelId,
+                    tag,
+                    hashData.vlessUuid,
+                    username,
+                );
                 response.push(tempRes);
             }
 
@@ -239,7 +252,17 @@ export class HandlerService implements OnModuleInit {
         }
     }
 
-    public async addUsers(data: AddUsersRequestDto): Promise<TResult<AddUserResponseModel>> {
+    public async addUsers(
+        data: AddUsersRequestDto,
+        panelId: number,
+    ): Promise<TResult<AddUserResponseModel>> {
+        return withCoreLock(() => this.addUsersUnsafe(data, panelId));
+    }
+
+    private async addUsersUnsafe(
+        data: AddUsersRequestDto,
+        panelId: number,
+    ): Promise<TResult<AddUserResponseModel>> {
         const tm = performance.now();
         try {
             const { affectedInboundTags, users } = data;
@@ -249,96 +272,93 @@ export class HandlerService implements OnModuleInit {
             }
 
             this.logger.log(
-                `Adding ${users.length} users to inbounds: ${affectedInboundTags.join(', ')}`,
+                `[panel #${panelId}] Adding ${users.length} users to inbounds: ${affectedInboundTags.join(', ')}`,
             );
 
             for (const user of users) {
-                for (const tag of this.internalService.getXtlsConfigInbounds()) {
-                    await this.xtlsApi.handler.removeUser(tag, user.userData.userId);
+                const username = toXrayEmail(panelId, user.userData.userId);
 
-                    await this.internalService.removeUserFromInbound(tag, user.userData.hashUuid);
+                for (const tag of this.internalService.getXtlsConfigInbounds()) {
+                    await this.xtlsApi.handler.removeUser(tag, username);
+
+                    await this.internalService.removeUserFromInbound(
+                        panelId,
+                        tag,
+                        user.userData.hashUuid,
+                        username,
+                    );
                 }
 
                 for (const item of user.inboundData) {
-                    let tempRes = null;
+                    let tempRes: ISdkResponse<AddUserResponseModelFromSdk> | null = null;
+                    let password: string | undefined;
 
                     switch (item.type) {
                         case 'trojan':
+                            password = user.userData.trojanPassword;
                             tempRes = await this.xtlsApi.handler.addTrojanUser({
                                 tag: item.tag,
-                                username: user.userData.userId,
-                                password: user.userData.trojanPassword,
+                                username,
+                                password,
                                 level: 0,
                             });
-                            if (tempRes.isOk) {
-                                await this.internalService.addUserToInbound(
-                                    item.tag,
-                                    user.userData.vlessUuid,
-                                );
-                            }
-
                             break;
                         case 'vless':
                             tempRes = await this.xtlsApi.handler.addVlessUser({
                                 tag: item.tag,
-                                username: user.userData.userId,
+                                username,
                                 uuid: user.userData.vlessUuid,
                                 flow: item.flow,
                                 level: 0,
                             });
-                            if (tempRes.isOk) {
-                                await this.internalService.addUserToInbound(
-                                    item.tag,
-                                    user.userData.vlessUuid,
-                                );
-                            }
                             break;
                         case 'shadowsocks':
+                            password = user.userData.ssPassword;
                             tempRes = await this.xtlsApi.handler.addShadowsocksUser({
                                 tag: item.tag,
-                                username: user.userData.userId,
-                                password: user.userData.ssPassword,
+                                username,
+                                password,
                                 cipherType: 0,
                                 ivCheck: false,
                                 level: 0,
                             });
-                            if (tempRes.isOk) {
-                                await this.internalService.addUserToInbound(
-                                    item.tag,
-                                    user.userData.vlessUuid,
-                                );
-                            }
                             break;
                         case 'shadowsocks22':
+                            password = Buffer.from(user.userData.ssPassword).toString('base64');
                             tempRes = await this.xtlsApi.handler.addShadowsocks2022User({
                                 tag: item.tag,
-                                username: user.userData.userId,
-                                key: Buffer.from(user.userData.ssPassword).toString('base64'),
+                                username,
+                                key: password,
                                 level: 0,
                             });
-                            if (tempRes.isOk) {
-                                await this.internalService.addUserToInbound(
-                                    item.tag,
-                                    user.userData.vlessUuid,
-                                );
-                            }
                             break;
                         case 'hysteria':
+                            password = user.userData.vlessUuid;
                             tempRes = await this.xtlsApi.handler.addHysteriaUser({
                                 tag: item.tag,
-                                username: user.userData.userId,
-                                uuid: user.userData.vlessUuid,
+                                username,
+                                uuid: password,
                                 level: 0,
                             });
-                            if (tempRes.isOk) {
-                                await this.internalService.addUserToInbound(
-                                    item.tag,
-                                    user.userData.vlessUuid,
-                                );
-                            }
                             break;
                         default:
                             break;
+                    }
+
+                    if (tempRes?.isOk) {
+                        await this.internalService.addUserToInbound(
+                            panelId,
+                            item.tag,
+                            user.userData.vlessUuid,
+                            buildXrayClient({
+                                type: item.type,
+                                email: username,
+                                hashUuid: user.userData.vlessUuid,
+                                vlessUuid: user.userData.vlessUuid,
+                                password,
+                                inbound: this.internalService.getTemplateInbound(item.tag),
+                            }),
+                        );
                     }
                 }
             }
@@ -364,6 +384,14 @@ export class HandlerService implements OnModuleInit {
 
     public async removeUsers(
         data: RemoveUsersRequestDto,
+        panelId: number,
+    ): Promise<TResult<RemoveUserResponseModel>> {
+        return withCoreLock(() => this.removeUsersUnsafe(data, panelId));
+    }
+
+    private async removeUsersUnsafe(
+        data: RemoveUsersRequestDto,
+        panelId: number,
     ): Promise<TResult<RemoveUserResponseModel>> {
         const tm = performance.now();
         try {
@@ -374,13 +402,14 @@ export class HandlerService implements OnModuleInit {
             }
 
             this.logger.log(
-                `Removing ${data.users.length} users from inbounds: ${Array.from(inboundTags).join(', ')}`,
+                `[panel #${panelId}] Removing ${data.users.length} users from inbounds: ${Array.from(inboundTags).join(', ')}`,
             );
 
             const removeUsersResponse: Array<ISdkResponse<RemoveUserResponseModelFromSdk>> = [];
 
             for (const user of data.users) {
-                const { userId, hashUuid } = user;
+                const { hashUuid } = user;
+                const userId = toXrayEmail(panelId, user.userId);
 
                 const userIps = await this.getUserIps(userId);
 
@@ -389,7 +418,12 @@ export class HandlerService implements OnModuleInit {
 
                     const tempRes = await this.xtlsApi.handler.removeUser(tag, userId);
 
-                    await this.internalService.removeUserFromInbound(tag, hashUuid);
+                    await this.internalService.removeUserFromInbound(
+                        panelId,
+                        tag,
+                        hashUuid,
+                        userId,
+                    );
                     removeUsersResponse.push(tempRes);
                 }
 
@@ -427,12 +461,13 @@ export class HandlerService implements OnModuleInit {
 
     public async dropUsersConnections(
         data: DropUsersConnectionsRequestDto,
+        panelId: number,
     ): Promise<TResult<GenericResponseModel>> {
         try {
             const { userIds } = data;
 
             for (const userId of userIds) {
-                const userIps = await this.getUserIps(userId);
+                const userIps = await this.getUserIps(toXrayEmail(panelId, userId));
                 this.eventBus.publish(new DropConnectionsEvent(userIps));
             }
 

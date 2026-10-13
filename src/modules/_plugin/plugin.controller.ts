@@ -1,8 +1,9 @@
 import { Body, Controller, Post, UseFilters, UseGuards } from '@nestjs/common';
 
-import { JwtDefaultGuard } from '@common/guards/jwt-guards';
 import { HttpExceptionFilter } from '@common/exception';
+import { JwtDefaultGuard } from '@common/guards/jwt-guards';
 import { errorHandler } from '@common/helpers';
+import { PanelId } from '@common/multi-panel';
 import { PLUGIN_CONTROLLER, PLUGIN_ROUTES } from '@libs/contracts/api';
 
 import {
@@ -14,8 +15,8 @@ import {
     UnblockIpsResponseDto,
 } from './dtos';
 import { SyncRequestDto, SyncResponseDto } from './dtos/sync.dto';
-import { NftService } from './services/nft.service';
 import { PluginService } from './plugin.service';
+import { NftService } from './services/nft.service';
 
 @UseFilters(HttpExceptionFilter)
 @UseGuards(JwtDefaultGuard)
@@ -27,8 +28,11 @@ export class PluginController {
     ) {}
 
     @Post(PLUGIN_ROUTES.SYNC)
-    public async sync(@Body() body: SyncRequestDto): Promise<SyncResponseDto> {
-        const response = await this.pluginService.sync(body);
+    public async sync(
+        @Body() body: SyncRequestDto,
+        @PanelId() panelId: number,
+    ): Promise<SyncResponseDto> {
+        const response = await this.pluginService.sync(body, panelId);
         const data = errorHandler(response);
 
         return {
@@ -37,8 +41,8 @@ export class PluginController {
     }
 
     @Post(PLUGIN_ROUTES.TORRENT_BLOCKER.COLLECT)
-    public async collectReports(): Promise<CollectReportsResponseDto> {
-        const response = await this.pluginService.collectReports();
+    public async collectReports(@PanelId() panelId: number): Promise<CollectReportsResponseDto> {
+        const response = await this.pluginService.collectReports(panelId);
         const data = errorHandler(response);
 
         return {
