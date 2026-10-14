@@ -11,7 +11,7 @@
 ```yaml
 services:
   remnanode:
-    image: <ваш образ этого форка>
+    image: ghcr.io/alexrosette/node:latest
     container_name: remnanode
     hostname: remnanode
     network_mode: host
@@ -33,6 +33,16 @@ services:
       - NODE_PORT_3=2224
       - SECRET_KEY_3=...
 ```
+
+Образ собирается GitHub Actions ([.github/workflows/fork-ghcr.yml](.github/workflows/fork-ghcr.yml)) для amd64 и arm64:
+
+| Тег | Когда обновляется |
+|---|---|
+| `ghcr.io/alexrosette/node:latest` | каждый push в `main` |
+| `ghcr.io/alexrosette/node:sha-<commit>` | конкретный коммит, для отката |
+| `ghcr.io/alexrosette/node:1.2.3` | git-тег `v1.2.3` |
+
+Обновление на сервере: `docker compose pull && docker compose up -d`.
 
 Если задан только `SECRET_KEY`, нода работает как обычная upstream-нода. Пропуски в номерах допустимы, например только `SECRET_KEY_3`.
 
