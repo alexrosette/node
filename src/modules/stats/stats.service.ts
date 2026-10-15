@@ -198,14 +198,13 @@ export class StatsService {
         panelId: number,
     ): Promise<TResult<GetCombinedStatsResponseModel>> {
         try {
-            const inbounds = await this.ledger.takeInboundsStats(panelId, reset);
-            const outbounds = await this.ledger.takeOutboundsStats(panelId, reset);
+            const combined = await this.ledger.takeCombinedStats(panelId, reset);
 
-            if (!inbounds || !outbounds) {
+            if (!combined) {
                 return fail(ERRORS.FAILED_TO_GET_COMBINED_STATS);
             }
 
-            return ok(new GetCombinedStatsResponseModel(inbounds, outbounds));
+            return ok(new GetCombinedStatsResponseModel(combined.inbounds, combined.outbounds));
         } catch (error) {
             this.logger.error(error);
             return fail(ERRORS.FAILED_TO_GET_COMBINED_STATS);

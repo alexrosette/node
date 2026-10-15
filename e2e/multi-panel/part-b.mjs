@@ -76,15 +76,44 @@ section('8. Traffic accounting is split per panel');
     const s1b = await usersStats(1, true);
     ok(Array.isArray(s1b) && s1b.length === 0, 'panel 1 buffer is empty after its reset', s1b);
 
-    for (const p of [1, 3]) {
-        const c = await combined(p, true);
-        const vless = c?.inbounds?.find((i) => i.inbound === 'VLESS_TCP');
-        ok(
-            vless && vless.downlink >= 3 * MB3 * 0.99,
-            `panel ${p} sees full inbound traffic (${vless?.downlink} B)`,
-            c,
-        );
-    }
+    // Node usage (what the panel records as node traffic = sum of outbounds) must follow
+    // the traffic of the panel's own users; the sum over all panels is the real traffic.
+    const sumOut = (c) => (c?.outbounds ?? []).reduce((acc, o) => acc + o.uplink + o.downlink, 0);
+    const vlessDown = (c) => c?.inbounds?.find((i) => i.inbound === 'VLESS_TCP')?.downlink ?? 0;
+
+    const c1 = await combined(1, true);
+    const c2 = await combined(2, true);
+    const c3 = await combined(3, true);
+
+    const user1 = one.uplink + one.downlink;
+    const user3 = three.uplink + three.downlink;
+    const n1 = sumOut(c1);
+    const n2 = sumOut(c2);
+    const n3 = sumOut(c3);
+    const total = n1 + n2 + n3;
+
+    console.log(
+        `     node usage: panel1=${n1} panel2=${n2} panel3=${n3} (users: ${user1} / ${user3} / 0)`,
+    );
+
+    ok(
+        Math.abs(n1 - user1) <= user1 * 0.05,
+        `panel 1 node usage ≈ its users traffic (${n1} vs ${user1})`,
+    );
+    ok(
+        Math.abs(n2 - user3) <= user3 * 0.05,
+        `panel 2 node usage ≈ its users traffic (${n2} vs ${user3})`,
+    );
+    ok(n3 <= total * 0.01, `panel 3 (no traffic) gets ~nothing (${n3} B)`);
+    ok(n2 > n1 * 1.8, 'panel 2 consumed ~2x more than panel 1');
+    ok(
+        vlessDown(c1) + vlessDown(c2) + vlessDown(c3) >= 3 * MB3 * 0.99,
+        `inbound traffic is not lost: sum over panels = ${vlessDown(c1) + vlessDown(c2) + vlessDown(c3)} B`,
+    );
+    ok(
+        Math.abs(total - (user1 + user3)) <= (user1 + user3) * 0.05,
+        `sum over panels ≈ real node traffic (${total} vs ${user1 + user3})`,
+    );
 }
 
 section('9. Panel 2 stops → only its users are detached');
