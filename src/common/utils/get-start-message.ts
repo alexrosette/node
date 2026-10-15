@@ -19,7 +19,12 @@ export async function getStartMessage(appPort: number, app: INestApplication) {
         'Docs → https://docs.rw\nCommunity → https://t.me/remnawave',
         panels.length > 1
             ? `Multi-panel mode: ${panels.length} panels\n` +
-              panels.map((panel) => `  ${panel.label} → port ${panel.port}`).join('\n')
+              panels
+                  .map(
+                      (panel) =>
+                          `  ${panel.label} → port ${panel.port}${panels.filter((p) => p.port === panel.port).length > 1 ? ' (shared, SNI)' : ''}`,
+                  )
+                  .join('\n')
             : `API Port: ${appPort}`,
         `XRay Core: v${xrayInfo.version || 'N/A'}\nXRay Path: /usr/local/bin/xray`,
         `${systemInfo.cpus}C, ${systemInfo.cpuModel}, ${prettyBytes(systemInfo.memoryTotal)}`,

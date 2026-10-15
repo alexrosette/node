@@ -14,8 +14,8 @@ services:
     environment:
       - NODE_PORT=2222
       - SECRET_KEY=""
-      # Multi-panel: one more port + SECRET_KEY per extra panel (see MULTI_PANEL.md)
-      # - NODE_PORT_2=2223
+      # Multi-panel: one SECRET_KEY_N per extra panel (see MULTI_PANEL.md).
+      # Without NODE_PORT_N the panel shares NODE_PORT (routed by SNI).
       # - SECRET_KEY_2=""
-      # - NODE_PORT_3=2224
       # - SECRET_KEY_3=""
+      # - NODE_PORT_3=2224   # optional: own port for panel 3

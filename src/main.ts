@@ -8,7 +8,8 @@ import { createServer, Server } from 'https';
 import morgan from 'morgan';
 import { utilities as nestWinstonModuleUtilities, WinstonModule } from 'nest-winston';
 import { ZodValidationPipe } from 'nestjs-zod';
-import { createSecureContext, SecureContext, SecureVersion } from 'node:tls';
+import { IncomingMessage } from 'node:http';
+import { createSecureContext, SecureContext, SecureVersion, TLSSocket } from 'node:tls';
 import { createLogger } from 'winston';
 import * as winston from 'winston';
 
@@ -17,7 +18,13 @@ import { NestFactory } from '@nestjs/core';
 
 import { TypedConfigService } from '@common/config/app-config/typed-config.service';
 import { NotFoundExceptionFilter } from '@common/exception';
-import { getPanels, IPanelDefinition, setRequestPanelId } from '@common/multi-panel';
+import {
+    getPanelIdBySni,
+    getPanelListeners,
+    getPanels,
+    IPanelListener,
+    setRequestPanelId,
+} from '@common/multi-panel';
 import { acquireInstanceLock } from '@common/utils/acquire-instance-lock';
 import { parseNodePayload } from '@common/utils/decode-node-payload';
 import { makeSniVerifier } from '@common/utils/decode-node-payload/decode-servername.util';
@@ -93,25 +100,94 @@ function buildHttpsOptions(
     } as { minVersion?: SecureVersion } & HttpsOptions;
 }
 
-function getSecondaryPanels(): IPanelDefinition[] {
+/**
+ * Several panels on one port: the node certificate (and the CA used to verify the panel's
+ * client certificate) is selected by the SNI the panel sends. Unknown SNI is rejected.
+ */
+function buildSharedHttpsOptions(
+    listener: IPanelListener,
+): { minVersion?: SecureVersion } & HttpsOptions {
+    const contexts = new Map<string, SecureContext>();
+
+    for (const panel of listener.panels) {
+        contexts.set(
+            panel.sni,
+            createSecureContext({
+                key: panel.payload.nodeKeyPem,
+                cert: panel.payload.nodeCertPem,
+                ca: [panel.payload.caCertPem],
+                minVersion: 'TLSv1.3',
+            }),
+        );
+    }
+
+    return {
+        SNICallback: (servername: string, cb: (err: Error | null, ctx?: SecureContext) => void) => {
+            const ctx = contexts.get(servername);
+
+            return ctx ? cb(null, ctx) : cb(new Error('unknown sni'));
+        },
+        requestCert: true,
+        rejectUnauthorized: true,
+        minVersion: 'TLSv1.3',
+        handshakeTimeout: 10_000,
+    } as { minVersion?: SecureVersion } & HttpsOptions;
+}
+
+function buildListenerHttpsOptions(
+    listener: IPanelListener,
+    sniVerification: boolean,
+): { minVersion?: SecureVersion } & HttpsOptions {
+    return listener.isShared
+        ? buildSharedHttpsOptions(listener)
+        : buildHttpsOptions(listener.panels[0].payload, sniVerification);
+}
+
+/**
+ * Marks the request with the panel it came from. Returns false if the panel is unknown.
+ */
+function tagPanelRequest(listener: IPanelListener, req: IncomingMessage): boolean {
+    if (!listener.isShared) {
+        setRequestPanelId(req, listener.panels[0].id);
+        return true;
+    }
+
+    const socket = req.socket;
+    const panelId =
+        socket instanceof TLSSocket
+            ? getPanelIdBySni((socket as TLSSocket & { servername?: unknown }).servername)
+            : undefined;
+
+    if (panelId === undefined || !listener.panels.some((panel) => panel.id === panelId)) {
+        socket.destroy();
+        return false;
+    }
+
+    setRequestPanelId(req, panelId);
+    return true;
+}
+
+function validateSecondaryPanels(): void {
     const [, ...secondary] = getPanels();
 
     for (const panel of secondary) {
-        logger.info(`Validating SECRET_KEY_${panel.id} (${panel.label}, port ${panel.port})...`);
+        logger.info(
+            `Validating SECRET_KEY_${panel.id} (${panel.label}, port ${panel.port}${panel.sharedPort ? ', shared' : ''})...`,
+        );
         assertPayloadIntegrity(panel.payload, logger);
     }
-
-    return secondary;
 }
 
 async function bootstrap(): Promise<void> {
     const internalSocketPath = process.env.INTERNAL_SOCKET_PATH!;
     const sniVerification = process.env.SNI_VERIFICATION === 'true';
 
-    const nodePayload = parseNodePayload(logger);
-    const secondaryPanels = getSecondaryPanels();
+    parseNodePayload(logger);
+    validateSecondaryPanels();
 
-    const httpsOptions = buildHttpsOptions(nodePayload, sniVerification);
+    const [primaryListener, ...extraListeners] = getPanelListeners();
+
+    const httpsOptions = buildListenerHttpsOptions(primaryListener, sniVerification);
 
     const app = await NestFactory.create(AppModule, {
         httpsOptions,
@@ -130,6 +206,13 @@ async function bootstrap(): Promise<void> {
     const nodeHttpServer: Server = app.getHttpServer();
     nodeHttpServer.keepAliveTimeout = 60_000;
     nodeHttpServer.headersTimeout = 61_000;
+
+    if (primaryListener.isShared) {
+        // Runs before the Nest/Express handler of the same request.
+        nodeHttpServer.prependListener('request', (req: IncomingMessage) => {
+            tagPanelRequest(primaryListener, req);
+        });
+    }
 
     // app.use(json({ limit: '1000mb' }));
 
@@ -171,16 +254,17 @@ async function bootstrap(): Promise<void> {
 
     const internalServer = internalApp.listen('\0' + internalSocketPath);
 
-    // Every additional panel gets its own mTLS listener (own CA / cert / JWT key).
+    // Panels with their own NODE_PORT_N get their own mTLS listener (own CA / cert / JWT key).
     // Requests are tagged with the panel id and handled by the same Nest application.
     const panelServers: Server[] = [];
 
-    for (const panel of secondaryPanels) {
+    for (const listener of extraListeners) {
         const panelServer = createServer(
-            buildHttpsOptions(panel.payload, sniVerification),
+            buildListenerHttpsOptions(listener, sniVerification),
             (req, res) => {
-                setRequestPanelId(req, panel.id);
-                httpServer(req, res);
+                if (tagPanelRequest(listener, req)) {
+                    httpServer(req, res);
+                }
             },
         );
 
@@ -189,7 +273,7 @@ async function bootstrap(): Promise<void> {
 
         await new Promise<void>((resolve, reject) => {
             panelServer.once('error', reject);
-            panelServer.listen(panel.port, () => {
+            panelServer.listen(listener.port, () => {
                 panelServer.off('error', reject);
                 resolve();
             });
@@ -197,7 +281,9 @@ async function bootstrap(): Promise<void> {
 
         panelServers.push(panelServer);
 
-        logger.info(`Listening for ${panel.label} on port ${panel.port}`);
+        logger.info(
+            `Listening for ${listener.panels.map((panel) => panel.label).join(', ')} on port ${listener.port}`,
+        );
     }
 
     let internalServerClosed = false;

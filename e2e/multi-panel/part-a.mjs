@@ -2,6 +2,7 @@
 import { buildStartBody, addUsersBody } from './fakepanel.mjs';
 import {
     state,
+    PORTS,
     P,
     ok,
     section,
@@ -24,8 +25,20 @@ section('1. Auth isolation');
     ok(h2.status === 200, 'panel 2 reaches its port', h2);
     const h3 = await req(3, 'GET', '/node/xray/healthcheck');
     ok(h3.status === 200, 'panel 3 reaches its port', h3);
-    const wrongTls = await req(2, 'GET', '/node/xray/healthcheck', undefined, { port: 1 });
-    ok(wrongTls.status === 0, 'panel 2 mTLS is rejected on panel 1 port', wrongTls);
+    // Panel 2 client certificate, presented as panel 1 (port + SNI of panel 1).
+    const wrongTls = await req(2, 'GET', '/node/xray/healthcheck', undefined, {
+        port: 1,
+        sniFrom: P[1],
+    });
+    ok(wrongTls.status === 0, 'panel 2 mTLS is rejected as panel 1', wrongTls);
+    if (PORTS[1] === PORTS[2]) {
+        const unknownSni = await req(1, 'GET', '/node/xray/healthcheck', undefined, {
+            sni: 'evil.example.com',
+        });
+        ok(unknownSni.status === 0, 'unknown SNI is rejected on the shared port', unknownSni);
+        const p2AsP3 = await req(2, 'GET', '/node/xray/healthcheck', undefined, { sniFrom: P[3] });
+        ok(p2AsP3.status === 0, 'panel 2 cert with panel 3 SNI is rejected', p2AsP3);
+    }
     const wrongJwt = await req(1, 'GET', '/node/xray/healthcheck', undefined, { jwtFrom: P[2] });
     ok(wrongJwt.status !== 200, 'panel 1 TLS + panel 2 JWT is rejected', wrongJwt);
 }

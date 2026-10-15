@@ -3,7 +3,9 @@ import { execFileSync } from 'node:child_process';
 
 import { loadPanel, call, makeUser } from './fakepanel.mjs';
 
-export const PORTS = { 1: 2222, 2: 2223, 3: 2224 };
+// E2E_PORTS="2222,2222,2224" → panel ports (several panels may share one port, routed by SNI)
+const portList = (process.env.E2E_PORTS ?? '2222,2223,2224').split(',').map(Number);
+export const PORTS = { 1: portList[0], 2: portList[1], 3: portList[2] };
 export const P = { 1: loadPanel(1), 2: loadPanel(2), 3: loadPanel(3) };
 export const state = { failed: 0 };
 export const ok = (cond, msg, extra) => {

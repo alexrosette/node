@@ -11,6 +11,18 @@ const { HashedSet } = require('@remnawave/hashed-set');
 const DIR = new URL('./.data', import.meta.url).pathname;
 const b64url = (b) => Buffer.from(b).toString('base64url');
 
+// Same as deriveSni() in the Remnawave panel (src/common/utils/certs/generate-servername.util.ts).
+const TLDS = ['com', 'net', 'org', 'io', 'dev', 'app'];
+export function deriveSni(caCertPem, jwtPublicKey) {
+    const canon = (pem) => pem.replace(/-----[^-]+-----/g, '').replace(/[^A-Za-z0-9+/=]/g, '');
+    const ikm = Buffer.concat([
+        Buffer.from(canon(jwtPublicKey), 'utf8'),
+        Buffer.from(canon(caCertPem), 'utf8'),
+    ]);
+    const okm = Buffer.from(crypto.hkdfSync('sha256', ikm, Buffer.alloc(0), 'rw-v1', 22));
+    return `${okm.subarray(0, 16).toString('hex')}.${okm.subarray(16, 21).toString('hex')}.${TLDS[okm[21] % TLDS.length]}`;
+}
+
 export function loadPanel(i) {
     const r = (f) => fs.readFileSync(`${DIR}/panel${i}/${f}`, 'utf8');
     const secretKey = Buffer.from(
@@ -29,13 +41,14 @@ export function loadPanel(i) {
     const sig = crypto.sign('sha256', Buffer.from(`${header}.${payload}`), r('jwt.key'));
     return {
         id: i,
+        sni: deriveSni(r('ca.crt'), r('jwt.pub')),
         secretKey,
         jwt: `${header}.${payload}.${b64url(sig)}`,
         tls: { cert: r('client.crt'), key: r('client.key'), ca: r('ca.crt') },
     };
 }
 
-export function call(panel, port, method, path, body, { tlsFrom, jwtFrom } = {}) {
+export function call(panel, port, method, path, body, { tlsFrom, jwtFrom, sniFrom, sni } = {}) {
     const tls = (tlsFrom ?? panel).tls;
     const jwt = (jwtFrom ?? panel).jwt;
     return new Promise((resolve) => {
@@ -47,6 +60,7 @@ export function call(panel, port, method, path, body, { tlsFrom, jwtFrom } = {})
                 method,
                 path,
                 ...tls,
+                servername: sni ?? (sniFrom ?? panel).sni,
                 checkServerIdentity: () => undefined,
                 rejectUnauthorized: true,
                 minVersion: 'TLSv1.3',

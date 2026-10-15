@@ -1,4 +1,5 @@
 import { parseNodePayloadFromConfigService } from '@common/utils/decode-node-payload/decode-node-payload';
+import { deriveSni } from '@common/utils/decode-node-payload/decode-servername.util';
 import { INodePayload } from '@common/utils/decode-node-payload/node-payload.interface';
 
 export const PRIMARY_PANEL_ID = 1 as const;
@@ -14,8 +15,19 @@ export interface IPanelDefinition {
     /** Human readable label used in logs. */
     label: string;
     port: number;
+    /** true when the panel has no own NODE_PORT_N and uses the shared NODE_PORT. */
+    sharedPort: boolean;
+    /** SNI the panel sends when connecting (derived from its CA + JWT key). */
+    sni: string;
     secretKey: string;
     payload: INodePayload;
+}
+
+export interface IPanelListener {
+    port: number;
+    panels: IPanelDefinition[];
+    /** Several panels on one port: TLS context and panel are selected by SNI. */
+    isShared: boolean;
 }
 
 let cachedPanels: IPanelDefinition[] | null = null;
@@ -44,10 +56,15 @@ function parsePort(raw: string, envName: string): number {
  * Reads panel definitions from the environment.
  *
  *  - Panel 1:  SECRET_KEY   + NODE_PORT
- *  - Panel N:  SECRET_KEY_N + NODE_PORT_N   (N = 2 … MAX_PANELS, gaps are allowed)
+ *  - Panel N:  SECRET_KEY_N [+ NODE_PORT_N]   (N = 2 … MAX_PANELS, gaps are allowed)
+ *
+ * Without NODE_PORT_N the panel shares NODE_PORT with panel 1. Panels on the same port
+ * are told apart by the SNI they send (Remnawave panel >= 3.3 always sends it).
  */
 export function parsePanelsFromEnv(env: NodeJS.ProcessEnv = process.env): IPanelDefinition[] {
     const panels: IPanelDefinition[] = [];
+
+    let sharedPort: number | null = null;
 
     for (let id = 1; id <= MAX_PANELS; id++) {
         const secretEnv = id === PRIMARY_PANEL_ID ? 'SECRET_KEY' : `SECRET_KEY_${id}`;
@@ -69,7 +86,7 @@ export function parsePanelsFromEnv(env: NodeJS.ProcessEnv = process.env): IPanel
 
         const rawPort = readEnv(env, portEnv);
 
-        if (!rawPort) {
+        if (!rawPort && id === PRIMARY_PANEL_ID) {
             throw new Error(`${secretEnv} is set, but ${portEnv} is missing.`);
         }
 
@@ -83,28 +100,72 @@ export function parsePanelsFromEnv(env: NodeJS.ProcessEnv = process.env): IPanel
             );
         }
 
+        const port: number = rawPort ? parsePort(rawPort, portEnv) : sharedPort!;
+
+        if (id === PRIMARY_PANEL_ID) {
+            sharedPort = port;
+        }
+
         panels.push({
             id,
             label: `panel #${id}`,
-            port: parsePort(rawPort, portEnv),
+            port,
+            sharedPort: !rawPort,
+            sni: deriveSni(payload.caCertPem, payload.jwtPublicKey),
             secretKey,
             payload,
         });
     }
 
-    const ports = new Set<number>();
+    for (const listener of groupPanelsByPort(panels)) {
+        const seen = new Map<string, number>();
 
-    for (const panel of panels) {
-        if (ports.has(panel.port)) {
-            throw new Error(
-                `Port ${panel.port} is used by more than one panel. Each panel must have its own NODE_PORT_N.`,
-            );
+        for (const panel of listener.panels) {
+            const duplicate = seen.get(panel.sni);
+
+            if (duplicate !== undefined) {
+                throw new Error(
+                    `Panels #${duplicate} and #${panel.id} use the same SECRET_KEY on port ${listener.port}.`,
+                );
+            }
+
+            seen.set(panel.sni, panel.id);
         }
-
-        ports.add(panel.port);
     }
 
     return panels;
+}
+
+function groupPanelsByPort(panels: IPanelDefinition[]): IPanelListener[] {
+    const byPort = new Map<number, IPanelDefinition[]>();
+
+    for (const panel of panels) {
+        const list = byPort.get(panel.port) ?? [];
+        list.push(panel);
+        byPort.set(panel.port, list);
+    }
+
+    return [...byPort].map(([port, list]) => ({
+        port,
+        panels: list,
+        isShared: list.length > 1,
+    }));
+}
+
+/**
+ * One listener per port. The listener of the primary panel (NODE_PORT) goes first.
+ */
+export function getPanelListeners(): IPanelListener[] {
+    return groupPanelsByPort(getPanels());
+}
+
+/**
+ * Resolves the panel of a connection on a shared port by the SNI it sent.
+ */
+export function getPanelIdBySni(servername: unknown): number | undefined {
+    if (typeof servername !== 'string' || servername === '') return undefined;
+
+    return getPanels().find((panel) => panel.sni === servername)?.id;
 }
 
 export function getPanels(): IPanelDefinition[] {

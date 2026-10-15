@@ -39,6 +39,20 @@ start_node -e NODE_PORT=2222 -e SECRET_KEY="$(sk 1)" \
 node "$HERE/part-a.mjs"
 node "$HERE/part-b.mjs"
 
+echo "### Shared port: 3 panels on NODE_PORT, routed by SNI"
+start_node -e NODE_PORT=2222 -e SECRET_KEY="$(sk 1)" \
+    -e SECRET_KEY_2="$(sk 2)" \
+    -e SECRET_KEY_3="$(sk 3)"
+E2E_PORTS=2222,2222,2222 node "$HERE/part-a.mjs"
+E2E_PORTS=2222,2222,2222 node "$HERE/part-b.mjs"
+
+echo "### Mixed: panels 1+2 on shared port, panel 3 on its own port"
+start_node -e NODE_PORT=2222 -e SECRET_KEY="$(sk 1)" \
+    -e SECRET_KEY_2="$(sk 2)" \
+    -e NODE_PORT_3=2224 -e SECRET_KEY_3="$(sk 3)"
+E2E_PORTS=2222,2222,2224 node "$HERE/part-a.mjs"
+E2E_PORTS=2222,2222,2224 node "$HERE/part-b.mjs"
+
 echo "### Single panel (upstream behaviour)"
 start_node -e NODE_PORT=2222 -e SECRET_KEY="$(sk 1)"
 node "$HERE/single-panel.mjs"
