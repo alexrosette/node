@@ -5,7 +5,8 @@ import { Injectable, Logger } from '@nestjs/common';
 
 import { HashedSet } from '@remnawave/hashed-set';
 
-import { PRIMARY_PANEL_ID, toXrayEmail } from '@common/multi-panel';
+import { LEDGER_ID, PRIMARY_PANEL_ID, toXrayEmail } from '@common/multi-panel';
+import { canonicalHash } from '@common/utils/canonical-json';
 import { StartXrayCommand } from '@libs/contracts/commands';
 
 export type TXrayClient = Record<string, unknown> & { email?: string };
@@ -30,6 +31,19 @@ class PanelUsersState {
     public readonly clients: TPanelClients = new Map();
 }
 
+function stripClients(config: Record<string, unknown>): Record<string, unknown> {
+    return {
+        ...config,
+        inbounds: Array.isArray(config.inbounds)
+            ? (config.inbounds as TXrayInbound[]).map((inbound) =>
+                  Array.isArray(inbound?.settings?.clients)
+                      ? { ...inbound, settings: { ...inbound.settings, clients: [] } }
+                      : inbound,
+              )
+            : config.inbounds,
+    };
+}
+
 @Injectable()
 export class InternalService {
     private readonly logger = new Logger(InternalService.name);
@@ -42,6 +56,13 @@ export class InternalService {
     private template: null | Record<string, unknown> = null;
     private templateHash: null | string = null;
     private templateOwner: null | number = null;
+
+    /**
+     * 'ledger': the base config was sent by ledger. Panels then only bring their users,
+     * their own base config is ignored.
+     */
+    private baseSource: 'ledger' | 'panel' = 'panel';
+    private ledgerBaseUpdatedAt: Date | null = null;
 
     /** Turns the merged config into the full config (adds API inbound, stats, policy …). */
     private configDecorator: ((merged: Record<string, unknown>) => Record<string, unknown>) | null =
@@ -85,6 +106,53 @@ export class InternalService {
         if (decorator) {
             this.configDecorator = decorator;
         }
+    }
+
+    public isLedgerBase(): boolean {
+        return this.baseSource === 'ledger';
+    }
+
+    /**
+     * Base config from ledger. Clients are stripped, the hash is sha256 of its canonical JSON
+     * (same as ledger computes it).
+     */
+    public setLedgerBase(config: Record<string, unknown>, updatedAt: Date = new Date()): string {
+        const stripped = stripClients(config);
+        const hash = canonicalHash(stripped);
+
+        this.template = stripped;
+        this.templateHash = hash;
+        this.templateOwner = LEDGER_ID;
+        this.baseSource = 'ledger';
+        this.ledgerBaseUpdatedAt = updatedAt;
+
+        this.logger.log(`[ledger] Base config set (${hash.slice(0, 12)}).`);
+
+        return hash;
+    }
+
+    public getLedgerBase(): {
+        config: Record<string, unknown>;
+        hash: string;
+        updatedAt: Date;
+    } | null {
+        if (!this.isLedgerBase() || !this.template || !this.templateHash) return null;
+
+        return {
+            config: this.template,
+            hash: this.templateHash,
+            updatedAt: this.ledgerBaseUpdatedAt ?? new Date(0),
+        };
+    }
+
+    public getPanelUsersCount(panelId: number): number {
+        let count = 0;
+
+        for (const clients of this.panels.get(panelId)?.clients.values() ?? []) {
+            count += clients.size;
+        }
+
+        return count;
     }
 
     public getTemplateHash(): null | string {
@@ -216,6 +284,10 @@ export class InternalService {
      * they are taken from the per-panel state when the merged config is built.
      */
     public setTemplate(panelId: number, config: Record<string, unknown>, hash: string): void {
+        if (this.isLedgerBase()) {
+            return;
+        }
+
         if (this.templateHash !== null && this.templateHash !== hash) {
             this.logger.warn(
                 `[panel #${panelId}] Base Xray config differs from the one previously applied (${this.templateHash} → ${hash}). ` +
@@ -223,16 +295,7 @@ export class InternalService {
             );
         }
 
-        this.template = {
-            ...config,
-            inbounds: Array.isArray(config.inbounds)
-                ? (config.inbounds as TXrayInbound[]).map((inbound) =>
-                      Array.isArray(inbound?.settings?.clients)
-                          ? { ...inbound, settings: { ...inbound.settings, clients: [] } }
-                          : inbound,
-                  )
-                : config.inbounds,
-        };
+        this.template = stripClients(config);
         this.templateHash = hash;
         this.templateOwner = panelId;
     }
@@ -246,18 +309,23 @@ export class InternalService {
     }
 
     /**
-     * Template + clients of every active panel.
+     * Template + clients of every active panel. Another base can be passed to check it
+     * before it is applied.
      */
-    public buildMergedConfig(): Record<string, unknown> {
-        if (!this.template) {
+    public buildMergedConfig(
+        base: null | Record<string, unknown> = this.template,
+    ): Record<string, unknown> {
+        if (!base) {
             throw new Error('Base config is not set');
         }
+
+        const template = base === this.template ? base : stripClients(base);
 
         const panelIds = this.getActivePanelIds();
         const templateTags = new Set<string>();
 
-        const inbounds = Array.isArray(this.template.inbounds)
-            ? (this.template.inbounds as TXrayInbound[]).map((inbound) => {
+        const inbounds = Array.isArray(template.inbounds)
+            ? (template.inbounds as TXrayInbound[]).map((inbound) => {
                   const tag = inbound?.tag;
 
                   if (!tag) return inbound;
@@ -286,7 +354,7 @@ export class InternalService {
                       },
                   };
               })
-            : this.template.inbounds;
+            : template.inbounds;
 
         for (const panelId of panelIds) {
             const state = this.panels.get(panelId)!;
@@ -311,10 +379,10 @@ export class InternalService {
             .join(', ');
 
         this.logger.log(
-            `Merged config built from ${panelIds.length} panel(s) (base from panel #${this.templateOwner}) · users per panel → ${totalUsers || 'none'}`,
+            `Merged config built from ${panelIds.length} panel(s) (base from ${this.templateOwner === LEDGER_ID ? 'ledger' : `panel #${this.templateOwner}`}) · users per panel → ${totalUsers || 'none'}`,
         );
 
-        return { ...this.template, inbounds };
+        return { ...template, inbounds };
     }
 
     public isNeedRestartCore(panelId: number, incomingHashes: THashes): boolean {
@@ -327,12 +395,13 @@ export class InternalService {
                 return true;
             }
 
-            if (incomingHashes.emptyConfig !== state.emptyConfigHash) {
+            // With the base from ledger only the users of the panel matter.
+            if (!this.isLedgerBase() && incomingHashes.emptyConfig !== state.emptyConfigHash) {
                 this.logger.warn('Detected changes in Xray Core base configuration');
                 return true;
             }
 
-            if (incomingHashes.emptyConfig !== this.templateHash) {
+            if (!this.isLedgerBase() && incomingHashes.emptyConfig !== this.templateHash) {
                 this.logger.warn(
                     `[panel #${panelId}] Running base configuration was applied by another panel and differs`,
                 );
@@ -508,8 +577,14 @@ export class InternalService {
         this.panels.clear();
         this.xtlsConfigInbounds.clear();
         this.xrayConfig = null;
-        this.configDecorator = null;
         this.isConfigDirty = false;
+
+        // The base from ledger outlives panels: only ledger replaces it.
+        if (this.isLedgerBase()) {
+            return;
+        }
+
+        this.configDecorator = null;
         this.template = null;
         this.templateHash = null;
         this.templateOwner = null;

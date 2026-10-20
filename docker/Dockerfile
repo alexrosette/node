@@ -109,6 +109,7 @@ RUN apt-get update \
     && xz -dc /tmp/s6-arch.tar.xz | tar -C / -xpf - \
     && rm -f /tmp/s6-noarch.tar.xz /tmp/s6-arch.tar.xz \
     && mkdir -p /var/log/xray \
+    && install -d -m 0700 /var/lib/remnanode \
     && chmod +x /etc/s6-overlay/scripts/init-env.sh \
         /etc/s6-overlay/s6-rc.d/xray/run \
         /etc/s6-overlay/s6-rc.d/xray-log/run \

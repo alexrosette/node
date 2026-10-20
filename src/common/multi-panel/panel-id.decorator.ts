@@ -14,6 +14,10 @@ export function setRequestPanelId(req: object, panelId: number): void {
     (req as TRequestWithPanel)[PANEL_ID_PROPERTY] = panelId;
 }
 
+export function hasRequestPanelId(req: object): boolean {
+    return (req as TRequestWithPanel)[PANEL_ID_PROPERTY] !== undefined;
+}
+
 export function getRequestPanelId(req: object): number {
     return (req as TRequestWithPanel)[PANEL_ID_PROPERTY] ?? PRIMARY_PANEL_ID;
 }

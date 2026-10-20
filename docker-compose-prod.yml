@@ -19,3 +19,8 @@ services:
       # - SECRET_KEY_2=""
       # - SECRET_KEY_3=""
       # - NODE_PORT_3=2224   # optional: own port for panel 3
+      # Ledger control plane (see MULTI_PANEL.md, "Управление из ledger"):
+      # - LEDGER_SECRET_KEY=""
+      # - LEDGER_STATE_DIR=/var/lib/remnanode
+    # volumes:
+    #   - /var/lib/remnanode:/var/lib/remnanode

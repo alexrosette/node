@@ -6,6 +6,7 @@ import { InjectXtls } from '@remnawave/xtls-sdk-nestjs';
 
 import { ownUsername, toXrayEmail } from '@common/multi-panel';
 import { fail, ok, TResult } from '@common/types';
+import { isCoreRestarting, isCoreStopped } from '@common/utils/core-restart';
 import { getSystemStats } from '@common/utils/get-system-stats';
 import { ERRORS } from '@libs/contracts/constants';
 
@@ -26,6 +27,8 @@ import {
 } from './models';
 import { StatsLedgerService } from './stats-ledger.service';
 
+const XRAY_INFO_TTL_MS = 30_000;
+
 @Injectable()
 export class StatsService {
     constructor(
@@ -34,6 +37,17 @@ export class StatsService {
         private readonly ledger: StatsLedgerService,
     ) {}
     private readonly logger = new Logger(StatsService.name);
+
+    /**
+     * Last successful answer of Xray Core. Served instead of an error while the node itself
+     * restarts the core, or for a short while after the last successful answer, so panels
+     * don't mark the node offline for these seconds (Remnawave treats a failed
+     * get-system-stats or a null xrayInfo as "node is down").
+     */
+    private lastXray: {
+        data: NonNullable<GetSystemStatsResponseModel['xrayInfo']>;
+        at: number;
+    } | null = null;
 
     public async getUserOnlineStatus(
         body: IGetUserOnlineStatusRequest,
@@ -58,11 +72,27 @@ export class StatsService {
         }
     }
 
+    private cachedXrayInfo(): GetSystemStatsResponseModel['xrayInfo'] {
+        if (!this.lastXray || isCoreStopped()) return null;
+
+        if (isCoreRestarting() || performance.now() - this.lastXray.at <= XRAY_INFO_TTL_MS) {
+            return this.lastXray.data;
+        }
+
+        return null;
+    }
+
     public async getSystemStats(panelId: number): Promise<TResult<GetSystemStatsResponseModel>> {
         try {
             const response = await this.xtlsSdk.stats.getSysStats();
 
-            if (!response.isOk || !response.data) {
+            const xrayInfo = response.isOk && response.data ? response.data : this.cachedXrayInfo();
+
+            if (response.isOk && response.data) {
+                this.lastXray = { data: response.data, at: performance.now() };
+            }
+
+            if (!xrayInfo) {
                 this.logger.warn(response);
                 return fail(ERRORS.FAILED_TO_GET_SYSTEM_STATS);
             }
@@ -76,7 +106,7 @@ export class StatsService {
             return {
                 isOk: true,
                 response: new GetSystemStatsResponseModel(
-                    response.data,
+                    xrayInfo,
                     {
                         torrentBlocker: {
                             reportsCount,

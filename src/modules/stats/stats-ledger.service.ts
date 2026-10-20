@@ -6,6 +6,7 @@ import { XtlsApi } from '@remnawave/xtls-sdk';
 import { InjectXtls } from '@remnawave/xtls-sdk-nestjs';
 
 import { fromXrayEmail, getPanelIds } from '@common/multi-panel';
+import { isCoreRestarting } from '@common/utils/core-restart';
 
 interface ITraffic {
     uplink: number;
@@ -93,6 +94,13 @@ export class StatsLedgerService {
         for (const panelId of this.panelIds) {
             this.ledgers.set(panelId, new PanelLedger());
         }
+    }
+
+    /**
+     * Moves the current Xray counters into the buffers (before a planned core restart).
+     */
+    public async drain(): Promise<void> {
+        await this.withLock(() => this.drainAll());
     }
 
     public async takeUsersStats(
@@ -239,6 +247,9 @@ export class StatsLedgerService {
      * Reads (and resets) every Xray counter and distributes the deltas between panels.
      * Users are drained first: their traffic in this interval defines the share of
      * every panel in the node traffic of the same interval.
+     *
+     * During a planned core restart the counters were drained right before the stop, so
+     * the buffers are complete and are answered as is instead of an error.
      */
     private async drainAll(): Promise<IDrainResult> {
         const result: IDrainResult = { users: false, inbounds: false, outbounds: false };
@@ -262,7 +273,7 @@ export class StatsLedgerService {
                 upWeights.set(owner.panelId, upWeights.get(owner.panelId)! + user.uplink);
                 downWeights.set(owner.panelId, downWeights.get(owner.panelId)! + user.downlink);
             }
-        } else {
+        } else if (!isCoreRestarting()) {
             this.logger.warn(usersResponse);
         }
 
@@ -287,6 +298,10 @@ export class StatsLedgerService {
             for (const item of outboundsResponse.data.outbounds) {
                 this.distribute('outbounds', item.outbound, item.uplink, item.downlink, up, down);
             }
+        }
+
+        if (isCoreRestarting()) {
+            return { users: true, inbounds: true, outbounds: true };
         }
 
         return result;

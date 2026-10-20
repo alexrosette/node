@@ -2,6 +2,8 @@ import { parseNodePayloadFromConfigService } from '@common/utils/decode-node-pay
 import { deriveSni } from '@common/utils/decode-node-payload/decode-servername.util';
 import { INodePayload } from '@common/utils/decode-node-payload/node-payload.interface';
 
+import { getLedger, ILedgerIdentity, LEDGER_ID } from './ledger';
+
 export const PRIMARY_PANEL_ID = 1 as const;
 
 /**
@@ -28,6 +30,8 @@ export interface IPanelListener {
     panels: IPanelDefinition[];
     /** Several panels on one port: TLS context and panel are selected by SNI. */
     isShared: boolean;
+    /** Ledger listens on NODE_PORT next to panel #1 (the listener is then always shared). */
+    ledger: ILedgerIdentity | null;
 }
 
 let cachedPanels: IPanelDefinition[] | null = null;
@@ -117,11 +121,21 @@ export function parsePanelsFromEnv(env: NodeJS.ProcessEnv = process.env): IPanel
         });
     }
 
-    for (const listener of groupPanelsByPort(panels)) {
+    for (const listener of groupPanelsByPort(panels, getLedger())) {
         const seen = new Map<string, number>();
+
+        if (listener.ledger) {
+            seen.set(listener.ledger.sni, LEDGER_ID);
+        }
 
         for (const panel of listener.panels) {
             const duplicate = seen.get(panel.sni);
+
+            if (duplicate === LEDGER_ID) {
+                throw new Error(
+                    `Panel #${panel.id} uses the same key as LEDGER_SECRET_KEY on port ${listener.port}.`,
+                );
+            }
 
             if (duplicate !== undefined) {
                 throw new Error(
@@ -136,7 +150,10 @@ export function parsePanelsFromEnv(env: NodeJS.ProcessEnv = process.env): IPanel
     return panels;
 }
 
-function groupPanelsByPort(panels: IPanelDefinition[]): IPanelListener[] {
+function groupPanelsByPort(
+    panels: IPanelDefinition[],
+    ledger: ILedgerIdentity | null,
+): IPanelListener[] {
     const byPort = new Map<number, IPanelDefinition[]>();
 
     for (const panel of panels) {
@@ -145,27 +162,38 @@ function groupPanelsByPort(panels: IPanelDefinition[]): IPanelListener[] {
         byPort.set(panel.port, list);
     }
 
-    return [...byPort].map(([port, list]) => ({
-        port,
-        panels: list,
-        isShared: list.length > 1,
-    }));
+    return [...byPort].map(([port, list]) => {
+        const withLedger = ledger !== null && ledger.port === port ? ledger : null;
+
+        return {
+            port,
+            panels: list,
+            // With ledger the TLS context must be selected by SNI even for a single panel.
+            isShared: list.length > 1 || withLedger !== null,
+            ledger: withLedger,
+        };
+    });
 }
 
 /**
  * One listener per port. The listener of the primary panel (NODE_PORT) goes first.
  */
 export function getPanelListeners(): IPanelListener[] {
-    return groupPanelsByPort(getPanels());
+    return groupPanelsByPort(getPanels(), getLedger());
 }
 
 /**
  * Resolves the panel of a connection on a shared port by the SNI it sent.
+ * Ledger resolves to LEDGER_ID.
  */
 export function getPanelIdBySni(servername: unknown): number | undefined {
     if (typeof servername !== 'string' || servername === '') return undefined;
 
-    return getPanels().find((panel) => panel.sni === servername)?.id;
+    const panelId = getPanels().find((panel) => panel.sni === servername)?.id;
+
+    if (panelId !== undefined) return panelId;
+
+    return getLedger()?.sni === servername ? LEDGER_ID : undefined;
 }
 
 export function getPanels(): IPanelDefinition[] {

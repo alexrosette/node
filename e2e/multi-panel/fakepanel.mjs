@@ -23,8 +23,8 @@ export function deriveSni(caCertPem, jwtPublicKey) {
     return `${okm.subarray(0, 16).toString('hex')}.${okm.subarray(16, 21).toString('hex')}.${TLDS[okm[21] % TLDS.length]}`;
 }
 
-export function loadPanel(i) {
-    const r = (f) => fs.readFileSync(`${DIR}/panel${i}/${f}`, 'utf8');
+export function loadPanel(i, dir = `panel${i}`) {
+    const r = (f) => fs.readFileSync(`${DIR}/${dir}/${f}`, 'utf8');
     const secretKey = Buffer.from(
         JSON.stringify({
             nodeCertPem: r('node.crt'),

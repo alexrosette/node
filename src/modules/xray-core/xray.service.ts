@@ -1,5 +1,8 @@
 import ems from 'enhanced-ms';
 import { execFile } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 import pMap from 'p-map';
 import pRetry, { AbortError } from 'p-retry';
@@ -11,14 +14,22 @@ import { XtlsApi } from '@remnawave/xtls-sdk';
 import { InjectXtls } from '@remnawave/xtls-sdk-nestjs';
 
 import { TypedConfigService } from '@common/config/app-config';
-import { PRIMARY_PANEL_ID } from '@common/multi-panel';
+import { isLedgerMode, markPanelStart, PRIMARY_PANEL_ID } from '@common/multi-panel';
 import { ok, TResult } from '@common/types';
 import { withCoreLock } from '@common/utils/core-lock';
+import {
+    hasCoreRestartedSince,
+    markCoreRestartFinished,
+    markCoreRestartStarted,
+    markCoreStopped,
+} from '@common/utils/core-restart';
 import { generateApiConfig } from '@common/utils/generate-api-config';
 import { getSystemInfo, getSystemStats } from '@common/utils/get-system-stats';
+import { readLedgerBase, saveLedgerBase } from '@common/utils/ledger-base-store';
 import { addXrayClientViaApi } from '@common/utils/xray-clients';
 import { StartXrayCommand } from '@libs/contracts/commands';
 import { KNOWN_ERRORS } from '@libs/contracts/constants';
+import { TNodeMetadata } from '@libs/contracts/models';
 
 import { IntegrationsService } from '@integration-modules/integrations.service';
 
@@ -28,6 +39,7 @@ import { RunPreStartCommand } from '../_plugin/commands/run-pre-start/run-pre-st
 import { GetTorrentBlockerStateQuery } from '../_plugin/queries/get-torrent-blocker-state';
 import { InternalService, TPanelClients, TXrayClient } from '../internal/internal.service';
 import { GetInterfaceStatsQuery } from '../network-stats/queries/get-interface-stats/get-interface-stats.query';
+import { DrainStatsCommand } from '../stats/commands/drain-stats/drain-stats.command';
 import { CoreLoaderService } from './core-loader.service';
 import { GeodataService } from './geodata.service';
 import {
@@ -80,6 +92,13 @@ function diffPanelClients(
     return { removals, additions };
 }
 
+export interface ILedgerCoreResult {
+    isStarted: boolean;
+    error: null | string;
+    tookMs: number;
+    version: null | string;
+}
+
 class XrayProcessDownError extends Error {
     constructor(message: string) {
         super(message);
@@ -101,6 +120,8 @@ export class XrayService implements OnApplicationBootstrap {
 
     private xrayVersion: null | string = null;
     private isXrayOnline: boolean = false;
+    /** Ledger stopped the core: panels can't start it again, only ledger can. */
+    private isStoppedByLedger: boolean = false;
     private nodeVersion: string = '0.0.0';
     constructor(
         @InjectXtls() private readonly xtlsSdk: XtlsApi,
@@ -146,13 +167,16 @@ export class XrayService implements OnApplicationBootstrap {
         ip: string,
         panelId: number = PRIMARY_PANEL_ID,
     ): Promise<TResult<StartXrayResponseModel>> {
-        return withCoreLock(() => this.startXrayUnsafe(body, ip, panelId));
+        const requestedAt = performance.now();
+
+        return withCoreLock(() => this.startXrayUnsafe(body, ip, panelId, requestedAt));
     }
 
     private async startXrayUnsafe(
         body: StartXrayCommand.Request,
         ip: string,
         panelId: number,
+        requestedAt: number,
     ): Promise<TResult<StartXrayResponseModel>> {
         const interfaceStats = await this.queryBus.execute(new GetInterfaceStatsQuery());
         const tm = performance.now();
@@ -186,7 +210,42 @@ export class XrayService implements OnApplicationBootstrap {
                 return respond(false, null, integrations.error);
             }
 
-            if (this.isXrayOnline && !this.disableHashedSetCheck && !body.internals.forceRestart) {
+            let { forceRestart } = body.internals;
+            const isLedgerBase = this.internalService.isLedgerBase();
+
+            markPanelStart(panelId);
+
+            if (isLedgerBase && forceRestart) {
+                this.logger.warn(
+                    `[panel #${panelId}] Force restart ignored: Xray Core is managed by ledger.`,
+                );
+                forceRestart = false;
+            }
+
+            if (isLedgerBase && this.isStoppedByLedger) {
+                this.logger.warn(
+                    `[panel #${panelId}] Xray Core is stopped by ledger, start request ignored.`,
+                );
+
+                return respond(false, null, 'Xray Core is stopped by ledger');
+            }
+
+            // The core was restarted while this request waited for the lock (e.g. the
+            // managing panel restarted it and the others re-sent start). One restart is
+            // enough: the running config already includes every panel's users, so only the
+            // usual hash check / hot sync is left.
+            if (forceRestart && this.isXrayOnline && hasCoreRestartedSince(requestedAt)) {
+                this.logger.log(
+                    `[panel #${panelId}] Force restart skipped: core was restarted while the request was waiting.`,
+                );
+                forceRestart = false;
+            }
+
+            // With the base from ledger panels never restart the core on their own: only
+            // users are synced (a restart happens only if hot sync is impossible).
+            const useHashCheck = !this.disableHashedSetCheck || isLedgerBase;
+
+            if (this.isXrayOnline && useHashCheck && !forceRestart) {
                 const { isOk } = await this.xtlsSdk.stats.getSysStats();
 
                 if (isOk) {
@@ -208,7 +267,7 @@ export class XrayService implements OnApplicationBootstrap {
                 }
             }
 
-            if (body.internals.forceRestart) {
+            if (forceRestart) {
                 this.logger.warn(`[panel #${panelId}] Force restart requested`);
             }
 
@@ -225,48 +284,11 @@ export class XrayService implements OnApplicationBootstrap {
                 body.internals.hashes.emptyConfig,
             );
 
-            const fullConfig = await this.rebuildFullConfig();
+            await this.rebuildFullConfig();
 
-            await this.coreLoaderService.prepare(fullConfig.geodata);
-            await this.geodataService.prepare(fullConfig.geodata);
+            const { isStarted, error: startError } = await this.bootCore(body.internals.metadata);
 
-            const xrayProcess = await this.restartXrayProcess();
-
-            if (xrayProcess.error) {
-                this.logger.error(`Failed to (re)start Xray process via s6: ${xrayProcess.error}`);
-
-                return respond(false, null, xrayProcess.error);
-            }
-
-            const { isStarted, error: startError } = await this.getXrayInternalStatus();
-
-            if (!isStarted) {
-                this.isXrayOnline = false;
-
-                this.logger.error(`Xray Core v${this.xrayVersion} failed to start.`, {
-                    timestamp: new Date().toISOString(),
-                    ...KNOWN_ERRORS.XRAY_FAILED_TO_START,
-                });
-
-                const tail = await this.dumpTailBlock(XRAY_LOG_FILE, 5);
-                const logReason = tail.at(-1)?.trim().slice(0, 500);
-
-                return respond(
-                    isStarted,
-                    this.xrayVersion,
-                    logReason ? `${startError} · ${logReason}` : startError,
-                );
-            }
-
-            this.isXrayOnline = true;
-
-            await this.refreshXrayVersion();
-
-            this.logger.log(`✔ XRay Core v${this.xrayVersion} is up and running.`);
-
-            await this.commandBus.execute(new RunPostStartCommand(body.internals.metadata));
-
-            return respond(isStarted, this.xrayVersion, null);
+            return respond(isStarted, this.xrayVersion, startError);
         } catch (error) {
             let errorMessage = null;
             if (error instanceof Error) {
@@ -287,6 +309,64 @@ export class XrayService implements OnApplicationBootstrap {
     }
 
     /**
+     * (Re)starts Xray Core with the config built by rebuildFullConfig(). While it lasts,
+     * panels keep seeing the node online (cached core stats).
+     * Must be called under the core lock.
+     */
+    private async bootCore(
+        metadata: TNodeMetadata | undefined,
+    ): Promise<{ isStarted: boolean; error: null | string }> {
+        const config = await this.internalService.getXrayConfig();
+
+        await this.coreLoaderService.prepare(config.geodata);
+        await this.geodataService.prepare(config.geodata);
+
+        markCoreRestartStarted();
+
+        let isStarted: boolean;
+        let startError: null | string;
+
+        try {
+            const xrayProcess = await this.restartXrayProcess();
+
+            if (xrayProcess.error) {
+                this.logger.error(`Failed to (re)start Xray process via s6: ${xrayProcess.error}`);
+                this.isXrayOnline = false;
+
+                return { isStarted: false, error: xrayProcess.error };
+            }
+
+            ({ isStarted, error: startError } = await this.getXrayInternalStatus());
+        } finally {
+            markCoreRestartFinished();
+        }
+
+        if (!isStarted) {
+            this.isXrayOnline = false;
+
+            this.logger.error(`Xray Core v${this.xrayVersion} failed to start.`, {
+                timestamp: new Date().toISOString(),
+                ...KNOWN_ERRORS.XRAY_FAILED_TO_START,
+            });
+
+            const tail = await this.dumpTailBlock(XRAY_LOG_FILE, 5);
+            const logReason = tail.at(-1)?.trim().slice(0, 500);
+
+            return { isStarted, error: logReason ? `${startError} · ${logReason}` : startError };
+        }
+
+        this.isXrayOnline = true;
+
+        await this.refreshXrayVersion();
+
+        this.logger.log(`✔ XRay Core v${this.xrayVersion} is up and running.`);
+
+        await this.commandBus.execute(new RunPostStartCommand(metadata));
+
+        return { isStarted: true, error: null };
+    }
+
+    /**
      * Applies the users of a single panel to the running core through the Xray API,
      * without restarting it (so users of other panels keep their connections).
      *
@@ -303,7 +383,10 @@ export class XrayService implements OnApplicationBootstrap {
             return false;
         }
 
-        if (this.internalService.getTemplateHash() !== hashes.emptyConfig) {
+        if (
+            !this.internalService.isLedgerBase() &&
+            this.internalService.getTemplateHash() !== hashes.emptyConfig
+        ) {
             this.logger.warn(
                 `[panel #${panelId}] Base config differs from the running one, full restart is required.`,
             );
@@ -393,20 +476,26 @@ export class XrayService implements OnApplicationBootstrap {
      * Rebuilds the config served to Xray Core from the base config and users of all panels.
      */
     private async rebuildFullConfig(): Promise<Record<string, unknown>> {
-        const tblockerState = await this.queryBus.execute(new GetTorrentBlockerStateQuery());
-
-        const decorate = (merged: Record<string, unknown>) =>
-            generateApiConfig({
-                config: merged,
-                torrentBlockerState: tblockerState,
-                internal: this.internal,
-            });
+        const decorate = await this.getConfigDecorator();
 
         const fullConfig = decorate(this.internalService.buildMergedConfig());
 
         this.internalService.setXrayConfig(fullConfig, decorate);
 
         return fullConfig;
+    }
+
+    private async getConfigDecorator(): Promise<
+        (merged: Record<string, unknown>) => Record<string, unknown>
+    > {
+        const tblockerState = await this.queryBus.execute(new GetTorrentBlockerStateQuery());
+
+        return (merged: Record<string, unknown>) =>
+            generateApiConfig({
+                config: merged,
+                torrentBlockerState: tblockerState,
+                internal: this.internal,
+            });
     }
 
     /**
@@ -419,7 +508,16 @@ export class XrayService implements OnApplicationBootstrap {
                 .getActivePanelIds()
                 .filter((id) => id !== panelId);
 
-            if (!this.isXrayOnline || otherPanels.length === 0) {
+            // With the base from ledger only ledger stops the core, even for the last panel.
+            if (this.internalService.isLedgerBase() && !this.isXrayOnline) {
+                this.internalService.removePanel(panelId);
+                return ok(new StopXrayResponseModel(true));
+            }
+
+            if (
+                !this.isXrayOnline ||
+                (otherPanels.length === 0 && !this.internalService.isLedgerBase())
+            ) {
                 return this.stopXrayUnsafe({
                     withOnlineCheck: false,
                     withPluginCleanup: true,
@@ -442,7 +540,7 @@ export class XrayService implements OnApplicationBootstrap {
                 await this.rebuildFullConfig();
 
                 this.logger.log(
-                    `[panel #${panelId}] Detached from node (${removals.length} user entries removed). Xray Core keeps running for panel(s): ${otherPanels.map((id) => `#${id}`).join(', ')}.`,
+                    `[panel #${panelId}] Detached from node (${removals.length} user entries removed). Xray Core keeps running for ${otherPanels.length > 0 ? `panel(s): ${otherPanels.map((id) => `#${id}`).join(', ')}` : 'ledger'}.`,
                 );
 
                 return ok(new StopXrayResponseModel(true));
@@ -474,6 +572,8 @@ export class XrayService implements OnApplicationBootstrap {
                 return ok(new StopXrayResponseModel(true));
             }
 
+            await this.drainStats();
+            markCoreStopped();
             await this.killAllXrayProcesses();
             await this.integrations.stop();
 
@@ -484,6 +584,212 @@ export class XrayService implements OnApplicationBootstrap {
         } catch (error) {
             this.logger.error(`Failed to stop Xray Process: ${error}`);
             return ok(new StopXrayResponseModel(false));
+        }
+    }
+
+    // ─── Ledger control (/node/ledger/*) ────────────────────────────────────────────
+
+    public getCoreState(): { online: boolean; version: null | string; stoppedByLedger: boolean } {
+        return {
+            online: this.isXrayOnline,
+            version: this.xrayVersion,
+            stoppedByLedger: this.isStoppedByLedger,
+        };
+    }
+
+    public async getCoreUptimeSec(): Promise<null | number> {
+        if (!this.isXrayOnline) return null;
+
+        const { isOk, data } = await this.xtlsSdk.stats.getSysStats();
+
+        return isOk && data ? data.uptime : null;
+    }
+
+    /**
+     * Restart with the current base + users of every panel, with plugin hooks.
+     */
+    public async ledgerRestartCore(reason: string): Promise<ILedgerCoreResult> {
+        return withCoreLock(async () => {
+            this.logger.log(`[ledger] Restarting Xray Core (${reason || 'no reason given'})...`);
+
+            return this.ledgerBoot();
+        });
+    }
+
+    public async ledgerStartCore(): Promise<ILedgerCoreResult> {
+        return withCoreLock(async () => {
+            if (this.isXrayOnline) {
+                return { isStarted: true, error: null, tookMs: 0, version: this.xrayVersion };
+            }
+
+            this.logger.log('[ledger] Starting Xray Core...');
+
+            return this.ledgerBoot();
+        });
+    }
+
+    public async ledgerStopCore(): Promise<{ isStopped: boolean }> {
+        return withCoreLock(async () => {
+            this.logger.log('[ledger] Stopping Xray Core for all panels...');
+
+            const result = await this.stopXrayUnsafe({ withPluginCleanup: true });
+            const isStopped = result.isOk && result.response.isStopped;
+
+            if (isStopped) {
+                this.isStoppedByLedger = true;
+            }
+
+            return { isStopped };
+        });
+    }
+
+    /**
+     * New base config from ledger: check it with `xray -test`, save it, apply it (restart).
+     */
+    public async ledgerApplyBase(
+        config: Record<string, unknown>,
+        baseHash: string | undefined,
+    ): Promise<
+        | { kind: 'applied'; hash: string; result: ILedgerCoreResult }
+        | { kind: 'conflict'; currentHash: null | string }
+        | { kind: 'invalid'; output: string }
+    > {
+        return withCoreLock(async () => {
+            const currentHash = this.internalService.getTemplateHash();
+
+            if (baseHash !== undefined && baseHash !== currentHash) {
+                return { kind: 'conflict', currentHash } as const;
+            }
+
+            const decorate = await this.getConfigDecorator();
+            const candidate = decorate(this.internalService.buildMergedConfig(config));
+
+            await this.coreLoaderService.prepare(candidate.geodata);
+            await this.geodataService.prepare(candidate.geodata);
+
+            const test = await this.testConfig(candidate);
+
+            if (!test.isOk) {
+                this.logger.error(`[ledger] Base config rejected by Xray Core: ${test.output}`);
+                return { kind: 'invalid', output: test.output } as const;
+            }
+
+            const updatedAt = new Date();
+
+            await saveLedgerBase({ config, updatedAt: updatedAt.toISOString() });
+
+            const hash = this.internalService.setLedgerBase(config, updatedAt);
+
+            this.logger.log(`[ledger] Base config ${hash.slice(0, 12)} saved, applying...`);
+
+            return { kind: 'applied', hash, result: await this.ledgerBoot() } as const;
+        });
+    }
+
+    /**
+     * Container start in ledger mode: the core is started with the saved base right away,
+     * users come with the start requests of the panels.
+     */
+    public async startFromSavedLedgerBase(): Promise<void> {
+        if (!isLedgerMode()) return;
+
+        let saved: Awaited<ReturnType<typeof readLedgerBase>>;
+
+        try {
+            saved = await readLedgerBase();
+        } catch (error) {
+            this.logger.error(`[ledger] Saved base config can't be read: ${error}`);
+            return;
+        }
+
+        if (!saved) {
+            this.logger.log('[ledger] No saved base config yet, panels manage the core.');
+            return;
+        }
+
+        await withCoreLock(async () => {
+            const hash = this.internalService.setLedgerBase(
+                saved.config,
+                new Date(saved.updatedAt),
+            );
+
+            this.logger.log(
+                `[ledger] Starting Xray Core with the saved base ${hash.slice(0, 12)}...`,
+            );
+
+            const result = await this.ledgerBoot();
+
+            if (!result.isStarted) {
+                this.logger.error(`[ledger] Xray Core failed to start: ${result.error}`);
+            }
+        });
+    }
+
+    /** Under the core lock. */
+    private async ledgerBoot(): Promise<ILedgerCoreResult> {
+        const tm = performance.now();
+
+        if (!this.internalService.hasTemplate()) {
+            return {
+                isStarted: false,
+                error: 'No base config yet',
+                tookMs: 0,
+                version: this.xrayVersion,
+            };
+        }
+
+        try {
+            await this.rebuildFullConfig();
+
+            this.isStoppedByLedger = false;
+
+            const { isStarted, error } = await this.bootCore(undefined);
+
+            return {
+                isStarted,
+                error,
+                tookMs: Math.round(performance.now() - tm),
+                version: this.xrayVersion,
+            };
+        } catch (error) {
+            this.isXrayOnline = false;
+
+            return {
+                isStarted: false,
+                error: error instanceof Error ? error.message : String(error),
+                tookMs: Math.round(performance.now() - tm),
+                version: this.xrayVersion,
+            };
+        }
+    }
+
+    private async testConfig(config: Record<string, unknown>): Promise<{
+        isOk: boolean;
+        output: string;
+    }> {
+        const dir = await mkdtemp(join(tmpdir(), 'rw-ledger-'));
+        const file = join(dir, 'config.json');
+
+        try {
+            await writeFile(file, JSON.stringify(config), { mode: 0o600 });
+
+            await execFileAsync(
+                this.xrayPath,
+                ['run', '-test', '-config', file, '-format', 'json'],
+                {
+                    timeout: 30_000,
+                    maxBuffer: 4 * 1024 * 1024,
+                },
+            );
+
+            return { isOk: true, output: '' };
+        } catch (error) {
+            const e = error as { stdout?: string; stderr?: string; message?: string };
+            const output = `${e.stdout ?? ''}${e.stderr ?? ''}`.trim() || e.message || 'unknown';
+
+            return { isOk: false, output: output.slice(-4000) };
+        } finally {
+            await rm(dir, { recursive: true, force: true });
         }
     }
 
@@ -597,6 +903,8 @@ export class XrayService implements OnApplicationBootstrap {
         error: string | null;
     }> {
         try {
+            await this.drainStats();
+
             await this.xrayProcess.stop();
 
             await this.commandBus.execute(new RunPreStartCommand());
@@ -608,6 +916,19 @@ export class XrayService implements OnApplicationBootstrap {
             return {
                 error: error instanceof Error ? error.message : 'Unknown error',
             };
+        }
+    }
+
+    /**
+     * Stopping the core resets its traffic counters: move them to the panel buffers first.
+     */
+    private async drainStats(): Promise<void> {
+        if (!this.isXrayOnline) return;
+
+        try {
+            await this.commandBus.execute(new DrainStatsCommand());
+        } catch (error) {
+            this.logger.warn(`Failed to drain stats before core stop: ${error}`);
         }
     }
 

@@ -4,7 +4,7 @@ import { ExtractJwt, Strategy } from 'passport-jwt';
 import { Injectable } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 
-import { getPanel, getRequestPanelId } from '@common/multi-panel';
+import { getPanel, getRequestPanelId, LEDGER_ID } from '@common/multi-panel';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy, 'registeredUserJWT') {
@@ -18,7 +18,9 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'registeredUserJWT')
                 _rawJwtToken: unknown,
                 done: (err: unknown, secretOrKey?: string) => void,
             ) => {
-                const panel = getPanel(getRequestPanelId(request));
+                const panelId = getRequestPanelId(request);
+                // Ledger has its own guard and is never accepted as a panel.
+                const panel = panelId === LEDGER_ID ? undefined : getPanel(panelId);
 
                 if (!panel) {
                     return done(new Error('Unknown panel'));
