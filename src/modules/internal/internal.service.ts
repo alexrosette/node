@@ -338,7 +338,9 @@ export class InternalService {
                       const clients = this.panels.get(panelId)?.clients.get(tag);
 
                       if (clients) {
-                          merged.push(...clients.values());
+                          // Not `push(...clients.values())`: spreading 100k+ users as call
+                          // arguments overflows the stack ("Maximum call stack size exceeded").
+                          for (const client of clients.values()) merged.push(client);
                       }
                   }
 

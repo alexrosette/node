@@ -619,6 +619,9 @@ export class XrayService implements OnApplicationBootstrap {
     public async ledgerStartCore(): Promise<ILedgerCoreResult> {
         return withCoreLock(async () => {
             if (this.isXrayOnline) {
+                // A panel may have started the core already (base from panels): the ledger
+                // stop is over either way, don't leave the flag behind.
+                this.isStoppedByLedger = false;
                 return { isStarted: true, error: null, tookMs: 0, version: this.xrayVersion };
             }
 
