@@ -31,8 +31,9 @@ docker run -d --name rwcli20 --network rwtest -v "$DATA/client20.json:/client.js
 
 start_node() {
     docker rm -f rwn >/dev/null 2>&1 || true
+    # Background stats drain every 0.5 s instead of 5 s, so tests don't wait for it.
     docker run -d --name rwn --network rwtest --cap-add NET_ADMIN \
-        -p 2222:2222 -p 2223:2223 -p 2224:2224 "$@" "$IMAGE" >/dev/null
+        -p 2222:2222 -p 2223:2223 -p 2224:2224 -e STATS_DRAIN_INTERVAL_MS=500 "$@" "$IMAGE" >/dev/null
     sleep 10
     docker cp "$HERE/dump.js" rwn:/dump.js
 }

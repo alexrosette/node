@@ -12,6 +12,8 @@ const N = 20;
 const PORT = 2222;
 const USERS_PER_PANEL = 5;
 const MB3 = 3_000_000;
+// run.sh starts the node with STATS_DRAIN_INTERVAL_MS=500
+const DRAIN_WAIT_MS = 1500;
 // panel → which of its users downloads and how many times (3 MB each)
 const TRAFFIC = [
     { panel: 1, user: 1, times: 1, port: 9101 },
@@ -178,6 +180,50 @@ console.log('\n=== Traffic: concurrent polling by all panels');
     ok(
         Math.abs(totalNode - totalUsers) <= totalUsers * 0.02,
         `sum over ${N} panels = real traffic (${totalNode} vs ${totalUsers})`,
+    );
+}
+
+console.log('\n=== Stats are answered from the buffers: latency does not grow with panels');
+{
+    const timed = async (k) => {
+        const t = performance.now();
+        const [users, combined] = await Promise.all([
+            req(k, 'POST', '/node/stats/get-users-stats', { reset: true }),
+            req(k, 'POST', '/node/stats/get-combined-stats', { reset: true }),
+        ]);
+        return {
+            ms: performance.now() - t,
+            ok: Array.isArray(users.json?.response?.users) && Array.isArray(combined.json?.response?.inbounds),
+        };
+    };
+
+    const single = [];
+    for (let i = 0; i < 5; i++) single.push((await timed(1)).ms);
+
+    const rounds = [];
+    let allOk = true;
+    for (let i = 0; i < 5; i++) {
+        const res = await Promise.all(panels.map((k) => timed(k)));
+        allOk &&= res.every((r) => r.ok);
+        rounds.push(Math.max(...res.map((r) => r.ms)));
+    }
+
+    const fmt = (xs) => xs.map((x) => x.toFixed(0)).join('/');
+    console.log(`     1 panel: ${fmt(single)} ms · ${N} panels at once (max per round): ${fmt(rounds)} ms`);
+    ok(allOk, `${N}×5 concurrent polls answered`);
+    ok(Math.max(...rounds) < 1000, `${N} panels polling at the same moment are answered within 1 s`);
+
+    // Traffic that arrives between polls shows up after one background drain.
+    for (const t of TRAFFIC) fetchVia(t.port);
+    await new Promise((r) => setTimeout(r, DRAIN_WAIT_MS));
+    const later = await Promise.all(
+        TRAFFIC.map((t) => req(t.panel, 'POST', '/node/stats/get-users-stats', { reset: true })),
+    );
+    ok(
+        later.every((r, i) =>
+            r.json?.response?.users?.find((u) => u.username === String(TRAFFIC[i].user))?.downlink >= MB3 * 0.97,
+        ),
+        'new traffic is in the buffers after one drain interval',
     );
 }
 

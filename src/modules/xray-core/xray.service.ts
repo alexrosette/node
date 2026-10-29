@@ -478,6 +478,11 @@ export class XrayService implements OnApplicationBootstrap {
             `[panel #${panelId}] Hot sync: removing ${removals.length}, adding ${additions.length} user entries...`,
         );
 
+        // Traffic of removed users since the last background drain would be lost with them.
+        if (removals.length > 0) {
+            await this.drainStats();
+        }
+
         await pMap(
             removals,
             async ({ tag, email }) => {
@@ -610,6 +615,8 @@ export class XrayService implements OnApplicationBootstrap {
             try {
                 const clients = this.internalService.getPanelClients(panelId);
                 const removals = diffPanelClients(clients, new Map()).removals;
+
+                await this.drainStats();
 
                 await pMap(
                     removals,

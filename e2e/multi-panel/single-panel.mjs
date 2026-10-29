@@ -2,7 +2,7 @@
 import { execFileSync } from 'node:child_process';
 
 import { buildStartBody, addUsersBody } from './fakepanel.mjs';
-import { state, ok, section, req, dump, emails, uptime, u, p1Users } from './helpers.mjs';
+import { state, ok, section, sleep, req, dump, emails, uptime, u, p1Users } from './helpers.mjs';
 section('Single-panel regression');
 const r = await req(1, 'POST', '/node/xray/start', buildStartBody(p1Users));
 ok(r.json?.response?.isStarted === true, 'start ok', r.json ?? r);
@@ -36,6 +36,7 @@ execFileSync('docker', [
     '/dev/null',
     'http://127.0.0.1:9001/',
 ]);
+await sleep(1500); // one background stats drain
 const s = (await req(1, 'POST', '/node/stats/get-users-stats', { reset: true })).json?.response
     ?.users;
 ok(s?.find((x) => x.username === '1')?.downlink >= 2_900_000, 'traffic counted', s);

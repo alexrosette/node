@@ -182,6 +182,8 @@ section('L6. Ledger stop / start');
     ok(stop.json?.response?.isStopped === true, 'core stopped');
     const s = await req(1, 'GET', '/node/stats/get-system-stats');
     ok(s.status !== 200 || !s.json?.response?.xrayInfo, 'panels see the truth: core is down');
+    const us = await req(1, 'POST', '/node/stats/get-users-stats', { reset: true });
+    ok(!Array.isArray(us.json?.response?.users), 'users stats fail instead of an empty list while the core is down', us.json ?? us);
     const ps = await req(1, 'POST', '/node/xray/start', buildStartBody(p1Users));
     ok(ps.json?.response?.isStarted === false, 'panel cannot start a core stopped by ledger', ps.json);
 

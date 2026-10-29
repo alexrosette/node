@@ -192,6 +192,7 @@ section('12. Fresh start by panel 2 only');
         emails(dump(), 'VLESS_TCP'),
     );
     fetchVia(9003);
+    await sleep(1500); // one background stats drain
     const s2 = await usersStats(2, true);
     ok(
         s2?.some((x) => x.username === '3'),

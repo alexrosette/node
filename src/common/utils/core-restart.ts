@@ -46,6 +46,13 @@ export function isCoreRestarting(): boolean {
     return state.restart !== null && performance.now() - state.restart.since < RESTART_GRACE_MS;
 }
 
+/**
+ * performance.now() of the last core (re)start, -Infinity if the core was never started.
+ */
+export function getCoreStartedAt(): number {
+    return state.lastStartedAt;
+}
+
 export function getCoreRestartSince(): null | number {
     return state.restart?.since ?? null;
 }
