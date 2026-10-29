@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 
-import { buildStartBody, buildTemplate, call, deriveSni } from './fakepanel.mjs';
+import { buildStartBody, buildTemplate, call, deriveSni, makeUser } from './fakepanel.mjs';
 import { state, ok, section, sleep, req, dump, emails, sys, uptime, p1Users, p2Users } from './helpers.mjs';
 
 const DIR = new URL('./.data/ledger', import.meta.url).pathname;
@@ -79,6 +79,12 @@ section('L3. Panels start, then ledger takes over the base config');
 {
     ok((await req(1, 'POST', '/node/xray/start', buildStartBody(p1Users))).json?.response?.isStarted === true, 'panel 1 start');
     ok((await req(2, 'POST', '/node/xray/start', buildStartBody(p2Users))).json?.response?.isStarted === true, 'panel 2 start');
+
+    // Base still from panels: ledger stop keeps the state, panels can't start the core.
+    ok((await ledger('POST', '/node/ledger/core/stop', {})).json?.response?.isStopped === true, 'ledger stop (base from panels)');
+    ok((await req(2, 'POST', '/node/xray/start', buildStartBody(p2Users))).json?.response?.isStarted === false, 'panel start blocked after ledger stop (base from panels)');
+    ok((await ledger('POST', '/node/ledger/core/start', {})).json?.response?.isStarted === true, 'ledger start (base from panels)');
+    ok(JSON.stringify(emails(dump(), 'VLESS_TCP')) === '["1","2","p2.1","p2.3"]', 'core/start brings users of both panels back at once', emails(dump(), 'VLESS_TCP'));
 
     const bad = buildTemplate();
     bad.inbounds[0].protocol = 'nonsense';
@@ -182,6 +188,7 @@ section('L6. Ledger stop / start');
     const start = await ledger('POST', '/node/ledger/core/start', {});
     ok(start.json?.response?.isStarted === true, 'ledger starts the core', start.json ?? start);
     ok((await sys(1))?.xrayInfo != null, 'panels see it online again');
+    ok(canFetch(9001) && canFetch(9003), 'users of both panels served right after core/start');
     await req(1, 'POST', '/node/xray/start', buildStartBody(p1Users));
     await req(2, 'POST', '/node/xray/start', buildStartBody(p2Users));
     ok(canFetch(9001) && canFetch(9003), 'users of both panels back after re-start');
@@ -203,6 +210,25 @@ section('L7. Container restart: core comes up with the saved base before panels'
     ok(canFetch(9001), 'panel 1 users served after its start');
     const perms = execFileSync('docker', ['exec', 'rwn', 'stat', '-c', '%a', '/var/lib/remnanode', '/var/lib/remnanode/base-config.json'], { encoding: 'utf8' }).split('\n');
     ok(perms[0] === '700' && perms[1] === '600', `state dir 0700, file 0600 (${perms.join(' ').trim()})`);
+}
+
+section('L8. Big panels: VLESS hot sync without restart, Shadowsocks above the cost limit restarts');
+{
+    await req(2, 'POST', '/node/xray/start', buildStartBody(p2Users));
+    const up0 = await uptime();
+    const vless = Array.from({ length: 60_000 }, (_, i) => ({ ...makeUser(i + 100, 'big'), tags: ['VLESS_TCP'] }));
+    const t = performance.now();
+    const r = await req(2, 'POST', '/node/xray/start', buildStartBody(vless));
+    const sec = (performance.now() - t) / 1000;
+    ok(r.json?.response?.isStarted === true && (await uptime()) >= up0, `60k VLESS users hot-synced without restart (${sec.toFixed(1)} s)`);
+    ok(canFetch(9001), 'panel 1 user kept its connection path during the big sync');
+
+    const ss = Array.from({ length: 6_000 }, (_, i) => ({ ...makeUser(i + 100, 'ss'), tags: ['SS_TCP'] }));
+    const up1 = await uptime();
+    const r2 = await req(2, 'POST', '/node/xray/start', buildStartBody(ss));
+    const up2 = await uptime();
+    ok(r2.json?.response?.isStarted === true && up2 < up1, `6k Shadowsocks users → restart instead of a slow hot sync (uptime ${up1} → ${up2})`);
+    await req(2, 'POST', '/node/xray/start', buildStartBody(p2Users));
 }
 
 console.log(`\nLedger finished, failures: ${state.failed}`);

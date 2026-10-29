@@ -155,6 +155,17 @@ export class InternalService {
         return count;
     }
 
+    /** Users of every panel in one inbound. */
+    public getInboundUsersCount(tag: string): number {
+        let count = 0;
+
+        for (const state of this.panels.values()) {
+            count += state.clients.get(tag)?.size ?? 0;
+        }
+
+        return count;
+    }
+
     public getTemplateHash(): null | string {
         return this.templateHash;
     }

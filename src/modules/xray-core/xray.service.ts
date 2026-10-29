@@ -52,7 +52,18 @@ import { XrayProcessService } from './xray-process.service';
 const XRAY_LOG_FILE = '/var/log/xray/current' as const;
 const execFileAsync = promisify(execFile);
 
-const HOT_SYNC_MAX_OPERATIONS = 50_000;
+/**
+ * Hot sync limits, measured against real Xray Core (one add/remove per API call):
+ *  - VLESS / Trojan / VMess: ~8 500 ops/s, linear (400k users ≈ 48 s), concurrency doesn't
+ *    matter. A full restart with the same users takes ~5 s but drops every connection.
+ *  - Shadowsocks 2022 multi-user rebuilds its whole user list on every change, so one
+ *    change costs ~ the number of users in the inbound. Cost = changes × inbound size,
+ *    ≈ 3M per second (5k users from scratch ≈ 9 s, 20k ≈ 130 s). Above ~10 s a restart
+ *    is cheaper.
+ */
+const HOT_SYNC_MAX_OPERATIONS = Number(process.env.HOT_SYNC_MAX_OPERATIONS) || 1_000_000;
+const HOT_SYNC_MAX_SHADOWSOCKS_COST =
+    Number(process.env.HOT_SYNC_MAX_SHADOWSOCKS_COST) || 30_000_000;
 const HOT_SYNC_CONCURRENCY = 32;
 
 function diffPanelClients(
@@ -120,6 +131,8 @@ export class XrayService implements OnApplicationBootstrap {
 
     private xrayVersion: null | string = null;
     private isXrayOnline: boolean = false;
+    /** metadata.uuid from the last start of every panel slot. */
+    private readonly panelNodeUuids = new Map<number, string>();
     /** Ledger stopped the core: panels can't start it again, only ledger can. */
     private isStoppedByLedger: boolean = false;
     private nodeVersion: string = '0.0.0';
@@ -214,6 +227,7 @@ export class XrayService implements OnApplicationBootstrap {
             const isLedgerBase = this.internalService.isLedgerBase();
 
             markPanelStart(panelId);
+            this.warnOnNodeUuidChange(panelId, body.internals.metadata?.uuid);
 
             if (isLedgerBase && forceRestart) {
                 this.logger.warn(
@@ -222,9 +236,16 @@ export class XrayService implements OnApplicationBootstrap {
                 forceRestart = false;
             }
 
-            if (isLedgerBase && this.isStoppedByLedger) {
+            if (this.isStoppedByLedger) {
+                // Keep the users up to date, so that ledger's core/start brings them all.
+                await this.internalService.ingestPanelConfig(
+                    panelId,
+                    body.internals.hashes,
+                    this.internalService.namespaceConfigUsers(panelId, body.xrayConfig),
+                );
+
                 this.logger.warn(
-                    `[panel #${panelId}] Xray Core is stopped by ledger, start request ignored.`,
+                    `[panel #${panelId}] Xray Core is stopped by ledger: users stored, core not started.`,
                 );
 
                 return respond(false, null, 'Xray Core is stopped by ledger');
@@ -306,6 +327,25 @@ export class XrayService implements OnApplicationBootstrap {
                 })} (IP: ${ip})`,
             );
         }
+    }
+
+    /**
+     * The node record in a panel has its own uuid. Another uuid in the same slot means the
+     * node was re-created in the panel, or another panel instance uses the same SECRET_KEY
+     * (cloned keys) and is about to replace the users of this slot. Only a warning.
+     */
+    private warnOnNodeUuidChange(panelId: number, uuid: string | undefined): void {
+        if (!uuid) return;
+
+        const previous = this.panelNodeUuids.get(panelId);
+
+        if (previous !== undefined && previous !== uuid) {
+            this.logger.warn(
+                `[panel #${panelId}] start from another node record (${previous} → ${uuid}): the node was re-created in the panel, or another panel instance uses the same SECRET_KEY.`,
+            );
+        }
+
+        this.panelNodeUuids.set(panelId, uuid);
     }
 
     /**
@@ -410,6 +450,21 @@ export class XrayService implements OnApplicationBootstrap {
             return false;
         }
 
+        const shadowsocksCost = this.estimateShadowsocksCost(removals, additions);
+
+        if (shadowsocksCost > HOT_SYNC_MAX_SHADOWSOCKS_COST) {
+            this.logger.warn(
+                `[panel #${panelId}] Shadowsocks user changes would take ≈${Math.ceil(shadowsocksCost / 3_000_000)} s via the API. Restarting core instead.`,
+            );
+            return false;
+        }
+
+        if (totalOps > 0) {
+            this.logger.log(
+                `[panel #${panelId}] Hot sync of ${totalOps} user changes (≈${Math.ceil(totalOps / 8_000)} s), core lock is held meanwhile.`,
+            );
+        }
+
         for (const { tag } of additions) {
             if (!this.internalService.getTemplateInbound(tag)) {
                 this.logger.warn(
@@ -473,6 +528,31 @@ export class XrayService implements OnApplicationBootstrap {
     }
 
     /**
+     * Σ over Shadowsocks inbounds: changes × users in the inbound (see HOT_SYNC_MAX_*).
+     */
+    private estimateShadowsocksCost(
+        removals: Array<{ tag: string }>,
+        additions: Array<{ tag: string }>,
+    ): number {
+        const changesByTag = new Map<string, number>();
+
+        for (const { tag } of [...removals, ...additions]) {
+            if (this.internalService.getTemplateInbound(tag)?.protocol !== 'shadowsocks') continue;
+
+            changesByTag.set(tag, (changesByTag.get(tag) ?? 0) + 1);
+        }
+
+        let cost = 0;
+
+        for (const [tag, changes] of changesByTag) {
+            const size = Math.max(this.internalService.getInboundUsersCount(tag), changes);
+            cost += changes * size;
+        }
+
+        return cost;
+    }
+
+    /**
      * Rebuilds the config served to Xray Core from the base config and users of all panels.
      */
     private async rebuildFullConfig(): Promise<Record<string, unknown>> {
@@ -509,7 +589,10 @@ export class XrayService implements OnApplicationBootstrap {
                 .filter((id) => id !== panelId);
 
             // With the base from ledger only ledger stops the core, even for the last panel.
-            if (this.internalService.isLedgerBase() && !this.isXrayOnline) {
+            if (
+                (this.internalService.isLedgerBase() || this.isStoppedByLedger) &&
+                !this.isXrayOnline
+            ) {
                 this.internalService.removePanel(panelId);
                 return ok(new StopXrayResponseModel(true));
             }
@@ -635,14 +718,23 @@ export class XrayService implements OnApplicationBootstrap {
         return withCoreLock(async () => {
             this.logger.log('[ledger] Stopping Xray Core for all panels...');
 
-            const result = await this.stopXrayUnsafe({ withPluginCleanup: true });
-            const isStopped = result.isOk && result.response.isStopped;
+            // Only the process is stopped: the base and the users of every panel stay in
+            // memory, so core/start brings the core back with all of them at once.
+            try {
+                await this.drainStats();
+                markCoreStopped();
+                await this.xrayProcess.stop();
 
-            if (isStopped) {
+                this.isXrayOnline = false;
                 this.isStoppedByLedger = true;
-            }
 
-            return { isStopped };
+                this.logger.log('[ledger] Xray Core stopped, panel state kept.');
+
+                return { isStopped: true };
+            } catch (error) {
+                this.logger.error(`[ledger] Failed to stop Xray Core: ${error}`);
+                return { isStopped: false };
+            }
         });
     }
 
