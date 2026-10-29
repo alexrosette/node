@@ -1,5 +1,6 @@
 /* eslint-disable no-console */
 import { execFileSync } from 'node:child_process';
+import crypto from 'node:crypto';
 
 import { buildStartBody } from './fakepanel.mjs';
 import {
@@ -10,6 +11,7 @@ import {
     req,
     dump,
     emails,
+    sys,
     uptime,
     p1Users,
     p2Users,
@@ -148,6 +150,44 @@ section('9. Panel 2 stops → only its users are detached');
     ok(failedFetch, 'detached panel 2 user can no longer connect');
     fetchVia(9001);
     ok(true, 'panel 1 user still connects');
+}
+
+section('9b. Plugin change restarts the core with the users of every panel');
+{
+    // Remnawave re-sends start only after a failed get-system-stats.
+    const sysOk = async (p) => (await sys(p))?.xrayInfo != null;
+    ok(await sysOk(1), 'panel 1 system stats ok');
+    ok(
+        !(await sysOk(2)),
+        'node without panel 2 users: its system stats fail, so it re-sends start',
+    );
+
+    const plugin = {
+        uuid: crypto.randomUUID(),
+        name: 'e2e',
+        config: { torrentBlocker: { enabled: true, blockDuration: 60, ignoreLists: {} } },
+    };
+    const s = await req(3, 'POST', '/node/plugin/sync', { plugin });
+    ok(s.json?.response?.accepted === true, 'panel 3 plugin sync ok', s.json ?? s);
+    const up = await uptime();
+    ok(up !== null && up < 5, `torrent blocker on → core restarted (uptime ${up})`);
+    ok(
+        JSON.stringify(emails(dump(), 'VLESS_TCP')) === JSON.stringify(['1', '2', 'p3.5']),
+        'users of panels 1 and 3 kept after the plugin restart',
+        emails(dump(), 'VLESS_TCP'),
+    );
+    ok((await sysOk(1)) && (await sysOk(3)), 'panels 1 and 3 still see the core running');
+    fetchVia(9001);
+    ok(true, 'panel 1 user connects after the plugin restart');
+
+    await req(3, 'POST', '/node/plugin/sync', { plugin: null });
+    await sleep(500);
+    ok(
+        JSON.stringify(emails(dump(), 'VLESS_TCP')) === JSON.stringify(['1', '2', 'p3.5']),
+        'users kept after the plugin is removed',
+        emails(dump(), 'VLESS_TCP'),
+    );
+    ok((await uptime()) !== null, 'core running after the plugin is removed');
 }
 
 section('10. Force restart from panel 1 keeps users of panel 3');

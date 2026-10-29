@@ -130,7 +130,10 @@ section('L4. Panels only bring users');
 
     await req(1, 'GET', '/node/xray/stop');
     await req(2, 'GET', '/node/xray/stop');
-    ok((await status()).xray.online === true && (await uptime()) >= up0, 'stop of the last panel keeps the core running');
+    // Panels that stopped get failed system stats (the node has none of their users), so ask ledger.
+    const st = await status();
+    ok(st.xray.online === true && st.xray.uptimeSec >= up0, 'stop of the last panel keeps the core running', st.xray);
+    ok((await sys(1))?.xrayInfo == null, 'stopped panel gets failed system stats');
     ok(emails(dump(), 'VLESS_TCP').length === 0, 'no users left');
 
     await req(1, 'POST', '/node/xray/start', buildStartBody(p1Users));

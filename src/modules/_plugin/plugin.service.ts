@@ -10,7 +10,7 @@ import { XRAY_TORRENT_BLOCKER_OUTBOUND_TAG } from '@libs/contracts/constants';
 
 import { GetAsnPrefixesQuery } from '../asn-lmdb/queries/get-asn-prefixes/get-asn-prefixes.query';
 import { RemoveOutboundCommand } from '../handler/commands/remove-outbound/remove-outbound.command';
-import { StopXrayCommand } from '../xray-core/commands/stop-xray';
+import { RestartXrayCommand } from '../xray-core/commands/restart-xray';
 import { SyncRequestDto } from './dtos';
 import { GenericResponseModel } from './models';
 import { TorrentBlockerReportsResponseModel } from './models/torrent-blocker-reports.response.model';
@@ -56,12 +56,7 @@ export class PluginService {
                     '[PLUGIN] Received empty plugins, but there is an active plugin. Cleaning up...',
                 );
                 await this.resetPlugins();
-                await this.commandBus.execute(
-                    new StopXrayCommand({
-                        withOnlineCheck: true,
-                        withPluginCleanup: false,
-                    }),
-                );
+                await this.commandBus.execute(new RestartXrayCommand('plugins removed'));
 
                 return ok(new GenericResponseModel(true));
             }
@@ -91,12 +86,7 @@ export class PluginService {
                 this.logger.error(`[PLUGIN] Invalid config: ${JSON.stringify(parsed.error)}`);
                 this.state.clearPanelPlugin(panelId);
                 await this.resetPlugins();
-                await this.commandBus.execute(
-                    new StopXrayCommand({
-                        withOnlineCheck: true,
-                        withPluginCleanup: false,
-                    }),
-                );
+                await this.commandBus.execute(new RestartXrayCommand('invalid plugin config'));
                 return ok(new GenericResponseModel(false));
             }
 
@@ -151,7 +141,7 @@ export class PluginService {
 
                 if (needsRestart) {
                     await this.commandBus.execute(
-                        new StopXrayCommand({ withOnlineCheck: true, withPluginCleanup: false }),
+                        new RestartXrayCommand('torrent blocker changed'),
                     );
                 }
             }

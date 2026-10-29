@@ -11,6 +11,7 @@ import { getSystemStats } from '@common/utils/get-system-stats';
 import { ERRORS } from '@libs/contracts/constants';
 
 import { GetTorrentBlockerReportsCountQuery } from '../_plugin/queries/get-torrent-blocker-reports-count';
+import { InternalService } from '../internal/internal.service';
 import { GetInterfaceStatsQuery } from '../network-stats/queries/get-interface-stats/get-interface-stats.query';
 import { IGetUserOnlineStatusRequest } from './interfaces';
 import {
@@ -28,6 +29,7 @@ import {
 import { StatsLedgerService } from './stats-ledger.service';
 
 const XRAY_INFO_TTL_MS = 30_000;
+const WARN_EVERY_MS = 60_000;
 
 @Injectable()
 export class StatsService {
@@ -35,8 +37,10 @@ export class StatsService {
         @InjectXtls() private readonly xtlsSdk: XtlsApi,
         private readonly queryBus: QueryBus,
         private readonly ledger: StatsLedgerService,
+        private readonly internalService: InternalService,
     ) {}
     private readonly logger = new Logger(StatsService.name);
+    private readonly lostPanelWarnedAt = new Map<number, number>();
 
     /**
      * Last successful answer of Xray Core. Served instead of an error while the node itself
@@ -97,6 +101,15 @@ export class StatsService {
                 return fail(ERRORS.FAILED_TO_GET_SYSTEM_STATS);
             }
 
+            // The core runs, but without this panel's users (its state was lost, or it never
+            // started). Remnawave sends start only after a failed get-system-stats, a null
+            // xrayInfo just leaves the node "disconnected": fail, so the panel re-sends start
+            // and its users come back with a hot sync.
+            if (!this.internalService.hasPanel(panelId)) {
+                this.warnLostPanel(panelId);
+                return fail(ERRORS.FAILED_TO_GET_SYSTEM_STATS);
+            }
+
             const interfaceStats = await this.queryBus.execute(new GetInterfaceStatsQuery());
             const systemStats = getSystemStats();
             const reportsCount = await this.queryBus.execute(
@@ -125,6 +138,22 @@ export class StatsService {
                 ...ERRORS.FAILED_TO_GET_SYSTEM_STATS,
             };
         }
+    }
+
+    private warnLostPanel(panelId: number): void {
+        const now = performance.now();
+
+        if (
+            now - (this.lostPanelWarnedAt.get(panelId) ?? Number.NEGATIVE_INFINITY) <
+            WARN_EVERY_MS
+        ) {
+            return;
+        }
+
+        this.lostPanelWarnedAt.set(panelId, now);
+        this.logger.warn(
+            `[panel #${panelId}] Xray Core runs without this panel's users: system stats fail until the panel sends start.`,
+        );
     }
 
     public async getUsersStats(

@@ -1,3 +1,3 @@
-import { StopXrayHandler } from './stop-xray/stop-xray.handler';
+import { RestartXrayHandler } from './restart-xray/restart-xray.handler';
 
-export const COMMANDS = [StopXrayHandler];
+export const COMMANDS = [RestartXrayHandler];

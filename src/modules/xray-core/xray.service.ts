@@ -593,10 +593,15 @@ export class XrayService implements OnApplicationBootstrap {
                 .getActivePanelIds()
                 .filter((id) => id !== panelId);
 
-            // With the base from ledger only ledger stops the core, even for the last panel.
+            // The core is down (failed start or health check, ledger stop): forget only this
+            // panel. Stopping here would drop the state of every other panel, and a panel
+            // that doesn't notice the outage never sends start again. With the base from
+            // ledger only ledger stops the core, even for the last panel.
             if (
-                (this.internalService.isLedgerBase() || this.isStoppedByLedger) &&
-                !this.isXrayOnline
+                !this.isXrayOnline &&
+                (otherPanels.length > 0 ||
+                    this.internalService.isLedgerBase() ||
+                    this.isStoppedByLedger)
             ) {
                 this.internalService.removePanel(panelId);
                 return ok(new StopXrayResponseModel(true));
@@ -606,6 +611,7 @@ export class XrayService implements OnApplicationBootstrap {
                 !this.isXrayOnline ||
                 (otherPanels.length === 0 && !this.internalService.isLedgerBase())
             ) {
+                // Only the last panel (or nothing left at all) gets here.
                 return this.stopXrayUnsafe({
                     withOnlineCheck: false,
                     withPluginCleanup: true,
@@ -646,6 +652,28 @@ export class XrayService implements OnApplicationBootstrap {
         withOnlineCheck?: boolean;
     }): Promise<TResult<StopXrayResponseModel>> {
         return withCoreLock(() => this.stopXrayUnsafe(args));
+    }
+
+    /**
+     * Plugins changed in a way that needs a fresh core (torrent blocker is part of the
+     * config). Upstream stops the core and waits for the panel to start it again. Here a
+     * stop would drop the users of every panel, and panels that don't notice the short
+     * outage never send start again: the core is rebuilt and restarted with all of them.
+     */
+    public async restartCoreKeepingPanels(reason: string): Promise<void> {
+        await withCoreLock(async () => {
+            if (!this.isXrayOnline || !this.internalService.hasTemplate()) return;
+
+            this.logger.log(`Restarting Xray Core for all panels (${reason})...`);
+
+            try {
+                await this.rebuildFullConfig();
+                await this.bootCore(undefined);
+            } catch (error) {
+                this.isXrayOnline = false;
+                this.logger.error(`Failed to restart Xray Core (${reason}): ${error}`);
+            }
+        });
     }
 
     private async stopXrayUnsafe(args: {

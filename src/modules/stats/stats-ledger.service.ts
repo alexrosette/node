@@ -372,7 +372,13 @@ export class StatsLedgerService implements OnApplicationBootstrap, OnModuleDestr
         const upWeights = new Map<number, number>(this.panelIds.map((id) => [id, 0]));
         const downWeights = new Map<number, number>(this.panelIds.map((id) => [id, 0]));
 
-        const usersResponse = await this.xtlsSdk.stats.getAllUsersStats(true);
+        // Read (and reset) all counters at once: bytes that flow between separate reads
+        // would be split by the weights of the wrong interval.
+        const [usersResponse, inboundsResponse, outboundsResponse] = await Promise.all([
+            this.xtlsSdk.stats.getAllUsersStats(true),
+            this.xtlsSdk.stats.getAllInboundsStats(true),
+            this.xtlsSdk.stats.getAllOutboundsStats(true),
+        ]);
 
         if (usersResponse.isOk && usersResponse.data) {
             result.users = true;
@@ -395,8 +401,6 @@ export class StatsLedgerService implements OnApplicationBootstrap, OnModuleDestr
         const up = this.panelIds.map((id) => upWeights.get(id)!);
         const down = this.panelIds.map((id) => downWeights.get(id)!);
 
-        const inboundsResponse = await this.xtlsSdk.stats.getAllInboundsStats(true);
-
         if (inboundsResponse.isOk && inboundsResponse.data) {
             result.inbounds = true;
 
@@ -404,8 +408,6 @@ export class StatsLedgerService implements OnApplicationBootstrap, OnModuleDestr
                 this.distribute('inbounds', item.inbound, item.uplink, item.downlink, up, down);
             }
         }
-
-        const outboundsResponse = await this.xtlsSdk.stats.getAllOutboundsStats(true);
 
         if (outboundsResponse.isOk && outboundsResponse.data) {
             result.outbounds = true;
