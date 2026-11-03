@@ -25,7 +25,6 @@ export class XrayProcessService {
     private static readonly S6_SVSTAT = '/command/s6-svstat';
     private static readonly CORE_LINK = '/usr/local/bin/rw-core';
 
-    private static readonly DOWN_TIMEOUT_MS = 10_000;
     private static readonly UP_TIMEOUT_MS = 10_000;
 
     constructor() {
@@ -37,14 +36,20 @@ export class XrayProcessService {
         return existsSync(this.controlFifo);
     }
 
+    /**
+     * No deadline: a loaded core (thousands of connections) can take well over 10 s to exit,
+     * and giving up halfway left the service "wanted down" with nobody starting it again.
+     */
     public async stop(): Promise<void> {
-        await execFileAsync(XrayProcessService.S6_SVC, [
-            '-wd',
-            '-T',
-            String(XrayProcessService.DOWN_TIMEOUT_MS),
-            '-d',
-            this.serviceDir,
-        ]);
+        const startedAt = performance.now();
+
+        await execFileAsync(XrayProcessService.S6_SVC, ['-wd', '-d', this.serviceDir]);
+
+        const tookSec = (performance.now() - startedAt) / 1000;
+
+        if (tookSec > 10) {
+            this.logger.warn(`Xray Core took ${tookSec.toFixed(1)} s to exit.`);
+        }
     }
 
     public async start(): Promise<void> {
