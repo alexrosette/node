@@ -8,6 +8,14 @@ import { HashedSet } from '@remnawave/hashed-set';
 
 import { StartXrayCommand } from '@libs/contracts/commands';
 
+export type TConfigClient = Record<string, unknown> & { email?: unknown };
+export type TConfigInbound = {
+    tag?: string;
+    protocol?: string;
+    settings?: Record<string, unknown> & { clients?: TConfigClient[] };
+    [key: string]: unknown;
+};
+
 @Injectable()
 export class InternalService {
     private readonly logger = new Logger(InternalService.name);
@@ -196,6 +204,58 @@ export class InternalService {
             this.logger.error(`Failed to remove user from inbound ${inboundTag}: ${error}`);
         } finally {
             this.mutex.release();
+        }
+    }
+
+    public hasXrayConfig(): boolean {
+        return this.xrayConfig !== null;
+    }
+
+    /** Users currently known to the node (unique by uuid over all inbounds). */
+    public getUsersCount(): number {
+        const users = new Set<string>();
+
+        for (const set of this.inboundsHashMap.values()) {
+            for (const user of set.values()) users.add(user);
+        }
+
+        return users.size;
+    }
+
+    public getConfigInbound(tag: string): TConfigInbound | undefined {
+        const inbounds = this.xrayConfig?.inbounds;
+
+        if (!Array.isArray(inbounds)) return undefined;
+
+        return (inbounds as TConfigInbound[]).find((inbound) => inbound?.tag === tag);
+    }
+
+    /**
+     * Users added or removed through the API are written into the stored config too, so a
+     * core restart without a new config from the panel (ledger core/restart, s6 restarting
+     * a crashed core) starts with the current users, not with those of the last panel start.
+     */
+    public addConfigClient(tag: string, client: TConfigClient): void {
+        const settings = this.getConfigInbound(tag)?.settings;
+
+        if (!settings) return;
+
+        const clients = Array.isArray(settings.clients) ? settings.clients : [];
+
+        settings.clients = [...clients.filter((item) => item?.email !== client.email), client];
+    }
+
+    public removeConfigClient(email: string): void {
+        const inbounds = this.xrayConfig?.inbounds;
+
+        if (!Array.isArray(inbounds)) return;
+
+        for (const inbound of inbounds as TConfigInbound[]) {
+            const clients = inbound?.settings?.clients;
+
+            if (Array.isArray(clients) && clients.some((item) => item?.email === email)) {
+                inbound.settings!.clients = clients.filter((item) => item?.email !== email);
+            }
         }
     }
 

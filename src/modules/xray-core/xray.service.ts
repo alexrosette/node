@@ -42,6 +42,13 @@ class XrayProcessDownError extends Error {
     }
 }
 
+export interface ILedgerRestartResult {
+    isStarted: boolean;
+    error: null | string;
+    tookMs: number;
+    version: null | string;
+}
+
 @Injectable()
 export class XrayService implements OnApplicationBootstrap {
     private readonly logger = new Logger(XrayService.name);
@@ -325,6 +332,72 @@ export class XrayService implements OnApplicationBootstrap {
             this.logger.error(`Failed to get node health check: ${error}`);
 
             return ok(new GetNodeHealthCheckResponseModel(false, false, null, this.nodeVersion));
+        }
+    }
+
+    public getCoreState(): { online: boolean; version: null | string; restarting: boolean } {
+        return {
+            online: this.isXrayOnline,
+            version: this.xrayVersion,
+            restarting: this.isXrayStartedProccesing,
+        };
+    }
+
+    public async getCoreUptimeSec(): Promise<null | number> {
+        if (!this.isXrayOnline) return null;
+
+        const { isOk, data } = await this.xtlsSdk.stats.getSysStats();
+
+        return isOk && data ? data.uptime : null;
+    }
+
+    /**
+     * Restart requested by ledger: the same core, the config the panel sent (with the users
+     * changed through the API since), plugin pre-start hooks.
+     */
+    public async ledgerRestartCore(reason: string): Promise<ILedgerRestartResult> {
+        const tm = performance.now();
+        const result = (isStarted: boolean, error: null | string): ILedgerRestartResult => ({
+            isStarted,
+            error,
+            tookMs: Math.round(performance.now() - tm),
+            version: this.xrayVersion,
+        });
+
+        if (this.isXrayStartedProccesing) {
+            return result(false, 'Request already in progress');
+        }
+
+        if (!this.internalService.hasXrayConfig()) {
+            return result(false, 'Xray Core was not started by the panel yet');
+        }
+
+        this.isXrayStartedProccesing = true;
+
+        try {
+            this.logger.log(`[ledger] Restarting Xray Core (${reason || 'no reason given'})...`);
+
+            const xrayProcess = await this.restartXrayProcess();
+
+            if (xrayProcess.error) {
+                this.isXrayOnline = false;
+                this.logger.error(`Failed to (re)start Xray process via s6: ${xrayProcess.error}`);
+
+                return result(false, xrayProcess.error);
+            }
+
+            const { isStarted, error } = await this.getXrayInternalStatus();
+
+            this.isXrayOnline = isStarted;
+
+            if (isStarted) {
+                await this.refreshXrayVersion();
+                this.logger.log(`✔ XRay Core v${this.xrayVersion} is up and running.`);
+            }
+
+            return result(isStarted, error);
+        } finally {
+            this.isXrayStartedProccesing = false;
         }
     }
 

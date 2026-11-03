@@ -45,3 +45,4 @@ lerna-debug.log*
 
 /build
 *.tar.gz
+/e2e/single/.data

@@ -8,7 +8,8 @@ import { Server } from 'https';
 import morgan from 'morgan';
 import { utilities as nestWinstonModuleUtilities, WinstonModule } from 'nest-winston';
 import { ZodValidationPipe } from 'nestjs-zod';
-import { createSecureContext, SecureContext, SecureVersion } from 'node:tls';
+import { IncomingMessage, ServerResponse } from 'node:http';
+import { createSecureContext, SecureContext, SecureVersion, TLSSocket } from 'node:tls';
 import { createLogger } from 'winston';
 import * as winston from 'winston';
 
@@ -17,9 +18,20 @@ import { NestFactory } from '@nestjs/core';
 
 import { TypedConfigService } from '@common/config/app-config/typed-config.service';
 import { NotFoundExceptionFilter } from '@common/exception';
+import {
+    getLedger,
+    ILedgerIdentity,
+    isLedgerPath,
+    isLedgerRequest,
+    isTaggedRequest,
+    markPanelRequest,
+    setLedgerRequest,
+} from '@common/ledger';
 import { acquireInstanceLock } from '@common/utils/acquire-instance-lock';
 import { parseNodePayload } from '@common/utils/decode-node-payload';
 import { makeSniVerifier } from '@common/utils/decode-node-payload/decode-servername.util';
+import { INodePayload } from '@common/utils/decode-node-payload/node-payload.interface';
+import { assertPayloadIntegrity } from '@common/utils/decode-node-payload/validate-secret-key.util';
 import { customLogFilter } from '@common/utils/filter-logs';
 import { getDuplicateInstanceMessage } from '@common/utils/get-duplicate-instance-message';
 import { getStartMessage } from '@common/utils/get-start-message';
@@ -51,15 +63,82 @@ const logger = createLogger({
     level: isDevelopment() ? 'debug' : 'info',
 });
 
+function secureContextOf(payload: INodePayload): SecureContext {
+    return createSecureContext({
+        key: payload.nodeKeyPem,
+        cert: payload.nodeCertPem,
+        ca: [payload.caCertPem],
+        minVersion: 'TLSv1.3',
+    });
+}
+
+/**
+ * Ledger shares NODE_PORT with the panel: the ledger SNI gets the ledger certificate and CA,
+ * any other name is the panel (checked against the panel SNI if SNI_VERIFICATION is on).
+ */
+function buildLedgerTlsOptions(
+    nodePayload: INodePayload,
+    ledger: ILedgerIdentity,
+    sniVerification: boolean,
+): HttpsOptions {
+    const panelCtx = secureContextOf(nodePayload);
+    const ledgerCtx = secureContextOf(ledger.payload);
+    const verifyPanelSni = makeSniVerifier(nodePayload.caCertPem, nodePayload.jwtPublicKey);
+
+    return {
+        SNICallback: (servername: string, cb: (err: Error | null, ctx?: SecureContext) => void) => {
+            if (servername === ledger.sni) return cb(null, ledgerCtx);
+            if (sniVerification && !verifyPanelSni(servername)) {
+                return cb(new Error('unknown sni'));
+            }
+
+            return cb(null, panelCtx);
+        },
+    } as HttpsOptions;
+}
+
+/**
+ * Runs before every route. Ledger may call only /node/ledger/*, the panel may not.
+ * Requests from the internal unix socket (Xray webhooks) are not TLS and pass through.
+ */
+function routeGuard(req: IncomingMessage, res: ServerResponse, next: () => void): void {
+    if (!(req.socket instanceof TLSSocket)) {
+        next();
+        return;
+    }
+
+    const isLedger = isLedgerRequest(req);
+
+    if (!isTaggedRequest(req) || isLedger !== isLedgerPath(req.url)) {
+        res.statusCode = 404;
+        res.end(() => req.socket.destroy());
+        return;
+    }
+
+    if (!isLedger) {
+        markPanelRequest();
+    }
+
+    next();
+}
+
 async function bootstrap(): Promise<void> {
     const internalSocketPath = process.env.INTERNAL_SOCKET_PATH!;
     const sniVerification = process.env.SNI_VERIFICATION === 'true';
 
     const nodePayload = parseNodePayload(logger);
+    const ledger = getLedger();
+
+    if (ledger) {
+        logger.info('Validating LEDGER_SECRET_KEY...');
+        assertPayloadIntegrity(ledger.payload, logger);
+    }
 
     let tlsCertOptions: HttpsOptions;
 
-    if (sniVerification) {
+    if (ledger) {
+        tlsCertOptions = buildLedgerTlsOptions(nodePayload, ledger, sniVerification);
+    } else if (sniVerification) {
         const realCtx: SecureContext = createSecureContext({
             key: nodePayload.nodeKeyPem,
             cert: nodePayload.nodeCertPem,
@@ -99,6 +178,8 @@ async function bootstrap(): Promise<void> {
         }),
     });
 
+    app.use(routeGuard);
+
     app.use(
         bodyParser.json({
             limit: '1000mb',
@@ -108,6 +189,16 @@ async function bootstrap(): Promise<void> {
     const nodeHttpServer: Server = app.getHttpServer();
     nodeHttpServer.keepAliveTimeout = 60_000;
     nodeHttpServer.headersTimeout = 61_000;
+
+    // Runs before the Nest/Express handler of the same request.
+    nodeHttpServer.prependListener('request', (req: IncomingMessage) => {
+        const servername =
+            req.socket instanceof TLSSocket
+                ? (req.socket as TLSSocket & { servername?: unknown }).servername
+                : undefined;
+
+        setLedgerRequest(req, ledger !== null && servername === ledger.sni);
+    });
 
     // app.use(json({ limit: '1000mb' }));
 

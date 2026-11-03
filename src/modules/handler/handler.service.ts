@@ -16,7 +16,7 @@ import { fail, ok, TResult } from '@common/types';
 import { ERRORS } from '@libs/contracts/constants/errors';
 
 import { DropConnectionsEvent } from '../_plugin/events/drop-connections';
-import { InternalService } from '../internal/internal.service';
+import { InternalService, TConfigClient } from '../internal/internal.service';
 import {
     AddUserRequestDto,
     AddUsersRequestDto,
@@ -37,6 +37,24 @@ export class HandlerService implements OnModuleInit {
         private readonly internalService: InternalService,
         private readonly eventBus: EventBus,
     ) {}
+
+    private vlessClient(id: string, email: string, flow: string | undefined): TConfigClient {
+        return flow ? { id, email, flow } : { id, email };
+    }
+
+    /**
+     * Shadowsocks 2022 multi-user inbounds keep the method on the inbound, legacy ones on
+     * every client.
+     */
+    private shadowsocksClient(tag: string, password: string, email: string): TConfigClient {
+        const method = this.internalService.getConfigInbound(tag)?.settings?.method;
+
+        if (typeof method !== 'string' || method.startsWith('2022-')) {
+            return { password, email };
+        }
+
+        return { password, method, email };
+    }
 
     public async onModuleInit(): Promise<void> {
         try {
@@ -66,6 +84,8 @@ export class HandlerService implements OnModuleInit {
             if (hashData.prevVlessUuid) {
                 userIps = await this.getUserIps(userId);
             }
+
+            this.internalService.removeConfigClient(userId);
 
             for (const tag of this.internalService.getXtlsConfigInbounds()) {
                 this.logger.debug(`Removing user: ${userId} from tag: ${tag}`);
@@ -101,6 +121,10 @@ export class HandlerService implements OnModuleInit {
                                 item.tag,
                                 hashData.vlessUuid,
                             );
+                            this.internalService.addConfigClient(item.tag, {
+                                password: item.password,
+                                email: item.username,
+                            });
                         }
                         response.push(tempRes);
                         break;
@@ -116,6 +140,10 @@ export class HandlerService implements OnModuleInit {
                             await this.internalService.addUserToInbound(
                                 item.tag,
                                 hashData.vlessUuid,
+                            );
+                            this.internalService.addConfigClient(
+                                item.tag,
+                                this.vlessClient(item.uuid, item.username, item.flow),
                             );
                         }
                         response.push(tempRes);
@@ -134,6 +162,10 @@ export class HandlerService implements OnModuleInit {
                                 item.tag,
                                 hashData.vlessUuid,
                             );
+                            this.internalService.addConfigClient(
+                                item.tag,
+                                this.shadowsocksClient(item.tag, item.password, item.username),
+                            );
                         }
                         response.push(tempRes);
                         break;
@@ -150,6 +182,10 @@ export class HandlerService implements OnModuleInit {
                                 item.tag,
                                 hashData.vlessUuid,
                             );
+                            this.internalService.addConfigClient(item.tag, {
+                                password: item.password,
+                                email: item.username,
+                            });
                         }
                         response.push(tempRes);
                         break;
@@ -166,6 +202,10 @@ export class HandlerService implements OnModuleInit {
                                 item.tag,
                                 hashData.vlessUuid,
                             );
+                            this.internalService.addConfigClient(item.tag, {
+                                auth: item.password,
+                                email: item.username,
+                            });
                         }
                         response.push(tempRes);
 
@@ -206,6 +246,8 @@ export class HandlerService implements OnModuleInit {
             }
 
             const userIps = await this.getUserIps(username);
+
+            this.internalService.removeConfigClient(username);
 
             for (const tag of inboundTags) {
                 this.logger.debug(`Removing user: ${username} from tag: ${tag}`);
@@ -253,6 +295,8 @@ export class HandlerService implements OnModuleInit {
             );
 
             for (const user of users) {
+                this.internalService.removeConfigClient(user.userData.userId);
+
                 for (const tag of this.internalService.getXtlsConfigInbounds()) {
                     await this.xtlsApi.handler.removeUser(tag, user.userData.userId);
 
@@ -275,6 +319,10 @@ export class HandlerService implements OnModuleInit {
                                     item.tag,
                                     user.userData.vlessUuid,
                                 );
+                                this.internalService.addConfigClient(item.tag, {
+                                    password: user.userData.trojanPassword,
+                                    email: user.userData.userId,
+                                });
                             }
 
                             break;
@@ -290,6 +338,14 @@ export class HandlerService implements OnModuleInit {
                                 await this.internalService.addUserToInbound(
                                     item.tag,
                                     user.userData.vlessUuid,
+                                );
+                                this.internalService.addConfigClient(
+                                    item.tag,
+                                    this.vlessClient(
+                                        user.userData.vlessUuid,
+                                        user.userData.userId,
+                                        item.flow,
+                                    ),
                                 );
                             }
                             break;
@@ -307,6 +363,14 @@ export class HandlerService implements OnModuleInit {
                                     item.tag,
                                     user.userData.vlessUuid,
                                 );
+                                this.internalService.addConfigClient(
+                                    item.tag,
+                                    this.shadowsocksClient(
+                                        item.tag,
+                                        user.userData.ssPassword,
+                                        user.userData.userId,
+                                    ),
+                                );
                             }
                             break;
                         case 'shadowsocks22':
@@ -321,6 +385,12 @@ export class HandlerService implements OnModuleInit {
                                     item.tag,
                                     user.userData.vlessUuid,
                                 );
+                                this.internalService.addConfigClient(item.tag, {
+                                    password: Buffer.from(user.userData.ssPassword).toString(
+                                        'base64',
+                                    ),
+                                    email: user.userData.userId,
+                                });
                             }
                             break;
                         case 'hysteria':
@@ -335,6 +405,10 @@ export class HandlerService implements OnModuleInit {
                                     item.tag,
                                     user.userData.vlessUuid,
                                 );
+                                this.internalService.addConfigClient(item.tag, {
+                                    auth: user.userData.vlessUuid,
+                                    email: user.userData.userId,
+                                });
                             }
                             break;
                         default:
@@ -383,6 +457,8 @@ export class HandlerService implements OnModuleInit {
                 const { userId, hashUuid } = user;
 
                 const userIps = await this.getUserIps(userId);
+
+                this.internalService.removeConfigClient(userId);
 
                 for (const tag of inboundTags) {
                     this.logger.debug(`Removing user: ${userId} from tag: ${tag}`);

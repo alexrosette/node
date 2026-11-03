@@ -3,6 +3,7 @@ import { Body, Controller, Get, Ip, Logger, Post, UseFilters, UseGuards } from '
 import { HttpExceptionFilter } from '@common/exception/http-exception.filter';
 import { JwtDefaultGuard } from '@common/guards/jwt-guards';
 import { errorHandler } from '@common/helpers/error-handler.helper';
+import { markPanelStart } from '@common/ledger';
 import { XRAY_CONTROLLER, XRAY_ROUTES } from '@libs/contracts/api';
 
 import {
@@ -26,6 +27,8 @@ export class XrayController {
         @Body() body: StartXrayRequestDto,
         @Ip() ip: string,
     ): Promise<StartXrayResponseDto> {
+        markPanelStart();
+
         const response = await this.xrayService.startXray(body, ip);
         const data = errorHandler(response);
 
