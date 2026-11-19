@@ -1,7 +1,7 @@
 # Fork build: multi-panel image → ghcr.io/<owner>/node
 # Needs no secrets — pushes with the built-in GITHUB_TOKEN.
 #
-#   push to main  → :latest, :sha-<short>
+#   push to main  → :latest, :sha-<short>, :xray-<XRAY_CORE_VERSION from docker/Dockerfile>
 #   tag v1.2.3    → :1.2.3, :1.2, :latest
 #   manual run    → Actions → "Fork image (GHCR)" → Run workflow
 
@@ -101,6 +101,18 @@ jobs:
       - name: Prepare
         run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
 
+      - name: Checkout Dockerfile
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: docker/Dockerfile
+          sparse-checkout-cone-mode: false
+
+      - name: Read Xray Core version
+        run: |
+          xray=$(sed -n 's/^ARG XRAY_CORE_VERSION=v\{0,1\}//p' docker/Dockerfile)
+          test -n "$xray" || { echo "XRAY_CORE_VERSION not found in docker/Dockerfile"; exit 1; }
+          echo "XRAY_VERSION=$xray" >> "$GITHUB_ENV"
+
       - name: Download digests
         uses: actions/download-artifact@v4
         with:
@@ -121,6 +133,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=sha-
+            type=raw,value=xray-${{ env.XRAY_VERSION }},enable=${{ github.ref == 'refs/heads/main' }}
             type=ref,event=branch,enable=${{ github.ref != 'refs/heads/main' }}
 
       - name: Login to GHCR
